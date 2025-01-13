@@ -1,0 +1,722 @@
+---
+title: "Transcription Factors Binding Sites Analysis"
+author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+      toc: true
+      toc_float: true
+      theme: 'yeti'
+      highlight: 'kate'
+      code_folding: hide
+params:
+  species: '9606'
+  type: 'ChIP-seq'
+  thr_conf: '80%'
+  strand: '*'
+  pvalue_type: 'TFMPvalue' #or 'Sampling'
+  pvalue_threshold: 0.05
+---
+
+**The purpose of this notebook is to detect differences in transcription factors binding to the enhancer in presence of the ancestral or contemporary allele of the SNV.**
+
+**Ancestral: C**\
+**Contemporary: T**
+
+```{r libraries, collapse=TRUE}
+library(TFBSTools)
+library(JASPAR2020)
+library(JASPAR2022)
+library(JASPAR2024)
+library(Biostrings)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(tibble)
+library(ggplot2)
+library(seqLogo)
+library(ggseqlogo)
+library(gridExtra)
+library(viridis)
+library(reshape2)
+library(DT)
+library(ggrepel)
+library(grDevices)
+```
+
+```{r params, collapse=TRUE}
+for (i in 1:length(params))
+  print(paste('Parameter:', names(params)[i], ' - Value:', params[[i]], '- Class:', class(params[[i]])))
+```
+
+## 1. Query JASPAR database for PWMs
+
+#### Set data type
+
+```{r ChIP-seqData, collapse=TRUE}
+chip.query <- list()
+chip.query[["species"]] <- 9606
+chip.query[["type"]] <- "ChIP-seq"
+chip.query[["all_versions"]] <- FALSE
+```
+
+#### JASPAR2020
+
+```{r PFM to PWM, collapse=TRUE}
+PFMatrixList.ChIP <- getMatrixSet(JASPAR2020, chip.query) #query JASPAR2020 
+pwmChIP <- toPWM(PFMatrixList.ChIP, pseudocounts=0.8) #PFM to PWM
+```
+
+***
+
+## 2. Define DNA sequences
+
+```{r collapse=TRUE}
+dna_modern_seq <- DNAString("AGTCAAAGAGTCAGCTTGCACTCAGAGTCAGCTTGTTGGCC")
+dna_ancestral_seq <- DNAString("AGTCAAAGAGTCAGCTTGCATTCAGAGTCAGCTTGTTGGCC")
+```
+
+***
+
+## 3. TFBSTools SearchSeq
+
+### Modern
+
+```{r collapse=TRUE}
+siteset_modern <- searchSeq(pwmChIP, dna_modern_seq, seqname = "modern.41bp", min.score = params$thr_conf, strand=params$strand)
+```
+
+### Ancestral
+
+```{r collapse=TRUE}
+siteset_ancestral <- searchSeq(pwmChIP, dna_ancestral_seq, seqname = "ancestral.41bp", min.score = params$thr_conf, strand=params$strand)
+```
+
+***
+
+## 4. Extract results
+
+```{r collapse=TRUE}
+TFBS_res_modern <- as.data.frame(writeGFF3(siteset_modern))
+TFBS_res_ancestral <- as.data.frame(writeGFF3(siteset_ancestral))
+```
+
+### Separate TFs
+
+```{r collapse=TRUE}
+# Step 1: Split the 'attributes' column into a list of strings
+TFBS_res_modern <- TFBS_res_modern %>%
+  mutate(attributes_split = str_split(attributes, ";"))
+
+# Step 2: Extract the individual components into new columns
+TFBS_res_modern <- TFBS_res_modern %>%
+  mutate(
+    TF = sapply(attributes_split, function(x) x[1]),
+    category = sapply(attributes_split, function(x) x[2]),
+    seq = sapply(attributes_split, function(x) x[3])
+  )
+
+# Step 3: Remove the prefixes
+TFBS_res_modern <- TFBS_res_modern %>%
+  mutate(
+    TF = str_replace(TF, "^TF=", ""),
+    category = str_replace(category, "^class=", ""),
+    seq = str_replace(seq, "^sequence=", "")
+  )
+
+# Step 4: Add a new column with a constant value
+TFBS_res_modern <- TFBS_res_modern %>%
+  mutate(sequence = "modern")
+
+# Step 5: Remove intermediate column
+TFBS_res_modern <- TFBS_res_modern %>%
+  select(-attributes_split)
+
+rownames(TFBS_res_modern) <- NULL
+```
+
+```{r collapse=TRUE}
+# Step 1: Split the 'attributes' column into a list of strings
+TFBS_res_ancestral <- TFBS_res_ancestral %>%
+  mutate(attributes_split = str_split(attributes, ";"))
+
+# Step 2: Extract the individual components into new columns
+TFBS_res_ancestral <- TFBS_res_ancestral %>%
+  mutate(
+    TF = sapply(attributes_split, function(x) x[1]),
+    category = sapply(attributes_split, function(x) x[2]),
+    seq = sapply(attributes_split, function(x) x[3])
+  )
+
+# Step 3: Remove the prefixes
+TFBS_res_ancestral <- TFBS_res_ancestral %>%
+  mutate(
+    TF = str_replace(TF, "^TF=", ""),
+    category = str_replace(category, "^class=", ""),
+    seq = str_replace(seq, "^sequence=", "")
+  )
+
+# Step 4: Add a new column with a constant value
+TFBS_res_ancestral <- TFBS_res_ancestral %>%
+  mutate(sequence = "modern")
+
+# Step 5: Remove intermediate column
+TFBS_res_ancestral <- TFBS_res_ancestral %>%
+  select(-attributes_split)
+
+rownames(TFBS_res_ancestral) <- NULL
+```
+
+
+## 5. Calculate Pvalues
+
+according to params, pvalue is calculated as: `r print(params$pvalue_type)`
+
+```{r collapse=TRUE}
+pvalues.modern <- as.data.frame(unlist(pvalues(siteset_modern, type=params$pvalue_type))) #TFMP for bs with 80%
+pvalues.ancestral <- as.data.frame(unlist(pvalues(siteset_ancestral, type=params$pvalue_type))) #TFMP for bs with 80%
+
+colnames(pvalues.modern) <- params$pvalue_type
+colnames(pvalues.ancestral) <- params$pvalue_type
+```
+
+### Add Pvalue column
+
+```{r collapse=TRUE}
+TFBS_res_modern$pvalues <- pvalues.modern$TFMPvalue
+TFBS_res_ancestral$pvalues <- pvalues.ancestral$TFMPvalue
+```
+
+***
+
+## 6. Interactive results table
+
+### Modern
+
+```{r}
+TFBS_res_modern %>% DT::datatable(class='hover', rownames=TRUE, escape=TRUE, extension='Buttons', caption = 'TFBS modern sequence',
+                options=list(dom='Bfrtip', buttons=list(I('colvis'), c('csv', 'excel'))))
+```
+
+### Ancestral
+
+```{r}
+TFBS_res_ancestral %>% DT::datatable(class='hover', rownames=TRUE, escape=TRUE, extension='Buttons', caption = 'TFBS ancestral sequence',
+                options=list(dom='Bfrtip', buttons=list(I('colvis'), c('csv', 'excel'))))
+```
+
+### Both
+
+```{r collapse=TRUE}
+TFBS_res_all <- rbind(TFBS_res_modern, TFBS_res_ancestral)
+
+#TFBS_res_all$PWM_ID2 <- sub("\\.[0-9]$", "", TFBS_res_all$PWM_ID, perl = TRUE) #strip point and digit appended after PWM and add as a new colum
+
+#TFBS_res_all <- TFBS_res_all %>% select(PWM_ID, PWM_ID2, everything())
+```
+
+***
+
+## 7. Find TFBS overlapping the Single Nucleotide Variant (SNV)
+
+```{r}
+# Define the SNV position
+target_position <- 21
+
+# Filter rows where the target position overlaps the TFBS
+TFBS_overlapping_all <- TFBS_res_all %>%
+  filter(start <= target_position & end >= target_position)
+
+unique(TFBS_overlapping_all$TF)
+#unique(TFBS_overlapping_all$PWM_ID2)
+```
+
+### Interactive results table of overlapping TFBS
+
+```{r collapse=TRUE}
+TFBS_overlapping_all %>% DT::datatable(class='hover', rownames=TRUE, escape=TRUE, extension='Buttons', caption = 'TFBS modern sequence',
+                options=list(dom='Bfrtip', buttons=list(I('colvis'), c('csv', 'excel'))))
+
+TFBS_overlapping_all
+```
+
+
+## 8. Extract binding sites frequency tables
+
+### Modern and Ancestral frequency tables
+
+```{r collapse=TRUE}
+TFtable_modern <- as.data.frame(table(TFBS_res_modern$TF))
+TFtable_ancestral <- as.data.frame(table(TFBS_res_ancestral$TF))
+
+colnames(TFtable_modern) <- c("TF", "Frequency")
+colnames(TFtable_ancestral) <- c("TF", "Frequency")
+
+TFtable_modern <- TFtable_modern[order(TFtable_modern$Freq, decreasing = TRUE), ]
+TFtable_ancestral <- TFtable_ancestral[order(TFtable_ancestral$Freq, decreasing = TRUE), ]
+
+rownames(TFtable_modern) <- NULL
+rownames(TFtable_ancestral) <- NULL
+```
+
+### Combined frequency table
+
+```{r collapse=TRUE}
+TFtable_all <- full_join(TFtable_modern, TFtable_ancestral, by = "TF")
+colnames(TFtable_all) <- c("TF", "Frequency_Modern", "Frequency_Ancestral")
+
+TFtable_all[is.na(TFtable_all)] <- 0 #Set NA to zeros
+```
+
+### Long format
+
+```{r collapse=TRUE}
+TFtable_all_long <- reshape2::melt(TFtable_all)
+```
+
+***
+
+## 9. Visualizations
+
+### Number of TFBS for each sequence {.tabset}
+
+```{r collapse=TRUE}
+opts <- theme_minimal() +
+theme(panel.grid = element_blank()) +
+theme(axis.text.x = element_text(size=13, color="black", vjust=0.5)) +
+theme(axis.text.y = element_text(colour = "black", size=13)) + 
+theme(legend.title = element_text(face="bold", size=14)) +
+theme(legend.position = "none")
+
+
+gg.occ.modern.85 <- ggplot(TFtable_modern, aes(x=TF, y=Frequency, fill=TF)) + geom_col(size=0.5, color="black") + opts + coord_flip() + scale_fill_viridis(discrete=T, option = "C", begin=0.01, end=0.1) + geom_hline(yintercept = c(1,2,3,4,5,6,7), color="gray15", alpha=0.8, size=0.5) + labs(x="transcription factors", y="number of sites")
+
+gg.occ.ancestral.85 <- ggplot(TFtable_ancestral, aes(x=TF, y=Frequency, fill=TF)) + geom_col(size=0.5, color="black") + opts + coord_flip() + scale_fill_viridis(discrete=T, begin=0.73, end=0.82) + geom_hline(yintercept = c(1,2,3,4,5,6,7), color="gray15", alpha=0.8, size=0.5) + labs(x="transcription factors", y="number of sites")
+```
+
+#### Modern
+
+```{r fig.width=5, fig.height=6, collapse=TRUE}
+gg.occ.modern.85
+```
+
+#### Ancestral
+
+```{r fig.width=5, fig.height=6, collapse=TRUE}
+gg.occ.ancestral.85
+```
+
+### {-}
+
+### Number of TFBS comparison barplot
+
+```{r fig.width=8, fig.height=6, collapse=TRUE}
+opts2 <- theme_bw() +
+#theme(panel.grid = element_blank()) +
+theme(axis.text.x = element_text(size=10, color="black", vjust=0.35, hjust=0.95)) +
+theme(axis.text.y = element_text(colour = "black", size=13)) + 
+theme(legend.text = element_text(face="bold", size=14), legend.title = element_blank())
+
+ggAll <- ggplot(TFtable_all_long, aes(y=TF, x=as.integer(value), fill=variable)) +
+  geom_col(position = "dodge", size=0.15, color="black", width = 0.75) +
+  scale_fill_manual(values=c("#bababc", "#609680")) +
+  labs(y="Transcription Factors", x="Number of TFBS") +
+  scale_x_continuous(labels = c(0,1,2,3,4,5,6,7,8), breaks = c(0,1,2,3,4,5,6,7,8), expand = c(0,0)) +
+  opts2
+
+ggAll
+```
+
+### Scatterplot of binding scores
+
+```{r fig.width=6, fig.height=6, collapse=TRUE}
+# Merge the dataframes by TF
+df_comparison <- merge(TFBS_res_modern, TFBS_res_ancestral, by = "TF", suffixes = c("_modern", "_ancestral"))
+
+#df_comparison <- df_comparison %>% filter(df_comparison$score_ancestral != df_comparison$score_modern)
+
+# Plot the binding scores comparison
+ggplot(df_comparison, aes(x = score_modern, y = score_ancestral)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Comparison of Binding Scores",
+       x = "Modern Sequence Binding Score",
+       y = "Ancestral Sequence Binding Score") +
+  theme_minimal() +
+  geom_text(aes(label=TF), hjust=1, vjust=1, size=3)
+```
+
+### Barplot of binding scores
+
+```{r fig.width=8, fig.height=5, collapse=TRUE}
+ggAll2 <- ggplot(TFBS_res_all, aes(x=TF, y=as.integer(score), fill=seqname)) +
+  geom_col(position = "dodge", size=0.15, color="black", width = 0.75) +
+  scale_fill_manual(values=c("#59c567", "#005591")) +
+  labs(x="transcription factors", y="score") +
+  coord_flip() +
+  opts2
+
+ggAll2
+```
+
+### TF afinities
+
+```{r fig.width=8, fig.height=5, collapse=TRUE}
+# Add a column to indicate sequence type
+TFBS_res_modern <- TFBS_res_modern %>%
+  mutate(sequence_type = "modern")
+
+TFBS_res_ancestral <- TFBS_res_ancestral %>%
+  mutate(sequence_type = "ancestral")
+
+# Combine the dataframes
+TFBS_res_combined <- bind_rows(TFBS_res_modern, TFBS_res_ancestral)
+
+# Identify TFs binding exclusively to one sequence or both
+TFBS_res_combined <- TFBS_res_combined %>%
+  group_by(TF) %>%
+  mutate(binding_type = case_when(
+    n_distinct(sequence_type) == 2 ~ "Both",
+    sequence_type == "modern" ~ "Modern only",
+    sequence_type == "ancestral" ~ "Ancestral only"
+  ))
+
+# Plot the differences in binding scores
+ggplot(TFBS_res_combined, aes(x = reorder(TF, -score), y = score, fill = binding_type)) +
+  geom_bar(stat = "identity", position = position_dodge(), color='black', size=0.5) +
+  coord_flip() +
+  labs(title = "Binding Scores for Modern and Ancestral Sequences",
+       x = "Transcription Factor (TF)",
+       y = "Binding Score",
+       fill = "Binding Type") +
+  theme_bw() +
+  scale_fill_manual(values = c("Both" = "white", "Modern only" = "#bababc", "Ancestral only" = "#609680")) +
+  theme(legend.position = "bottom")
+```
+
+### TFBS region plot
+
+```{r AdjustOverlapFunction, collapse=TRUE}
+# Function to adjust y positions in case of overlaps
+adjust_y_positions <- function(df) {
+  df <- df %>% arrange(start)
+  
+  for (i in 2:nrow(df)) {
+    for (j in 1:(i-1)) {
+      if (df$start[i] <= df$end[j] && df$end[i] >= df$start[j]) {
+        # If there's an overlap, adjust the y_position
+        if (grepl("modern", df$seqname[i])) {
+          df$y_position[i] <- df$y_position[i] + 0.5
+        } else {
+          df$y_position[i] <- df$y_position[i] - 0.5
+        }
+      }
+    }
+  }
+  return(df)
+}
+```
+
+### All TFBS and forward strands-only for both sequences
+
+Here I visualize only the forward strand for both ancestral and modern sequence, visualizing on the forward strand all TFBS including those on the reverse strand
+
+```{r fig.width=10, fig.height=10}
+modern_seq <- as.character(dna_modern_seq)
+ancestral_seq <- as.character(dna_ancestral_seq)
+
+# Create a data frame for the DNA sequences
+dna_df <- data.frame(
+  Position = 1:nchar(modern_seq),
+  Modern = unlist(strsplit(modern_seq, "")),
+  Ancestral = unlist(strsplit(ancestral_seq, ""))
+)
+
+# Adjust y positions for plotting
+dna_df$y_modern <- 1
+dna_df$y_ancestral <- -1
+
+# Create a binding_elements data frame using the provided data
+binding_elements <- TFBS_overlapping_all #TFBS_overlapping_all[TFBS_overlapping_all$strand == '+', ] # To get only one strand
+binding_elements$y_position <- ifelse(grepl("modern", binding_elements$seqname), 1.5, -1.5)
+
+# Assign colors based on the TF column
+tf_colors <- setNames(rainbow(length(unique(binding_elements$TF))), unique(binding_elements$TF))
+
+# Apply the adjustment function to the binding elements dataframe
+binding_elements <- binding_elements %>%
+  group_by(seqname) %>%
+  do(adjust_y_positions(.))
+
+# Print out the binding_elements to see if any start/end positions are out of range
+print(binding_elements)
+
+# Adjust x-axis and y-axis limits dynamically based on the data
+x_limits <- c(min(binding_elements$start), max(binding_elements$end))
+y_limits <- c(min(binding_elements$y_position) - 0.5, max(binding_elements$y_position) + 0.5)
+```
+
+```{r fig.width=10, fig.height=7}
+ggplot() +
+  geom_text(data = dna_df, aes(x = Position, y = y_modern, label = Modern), 
+                               color = ifelse(dna_df$Position == 21, "red", "black"), size = 5, family = "Courier", fontface = 'bold') +
+  geom_text(data = dna_df, aes(x = Position, y = y_ancestral, label = Ancestral), 
+                               color = ifelse(dna_df$Position == 21, "red", "black"), size = 5, family = "Courier", fontface = 'bold') +
+  geom_segment(data = binding_elements, aes(x = start, xend = end, y = y_position, yend = y_position, color = TF), 
+               size = 2) +
+  geom_point(data = binding_elements, aes(x = start, y = y_position, color = TF), 
+             size = 6, shape = 108) +
+  geom_point(data = binding_elements, aes(x = end, y = y_position, color = TF), 
+             size = 6, shape = 108) +
+  scale_x_continuous(breaks = seq(1, nchar(modern_seq), 2),
+                      sec.axis = dup_axis(name = NULL)) +  # Adds a secondary x-axis at the top
+  ylim(y_limits) +  # Dynamically set ylim based on adjusted y_positions
+  scale_color_manual(values = tf_colors) +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x.top = element_text(colour = 'black'),
+        axis.text.x = element_text(color = 'black')) +  # Make sure the top axis text is visible
+  scale_color_manual(values = c(tf_colors)) +
+  coord_fixed(ratio = 2.5)  # Adjust the ratio to compress the y-axis
+```
+
+
+### Maps of TFBS on forward and reverse strands
+
+Here i visualize both strands for one sequence only, with TFs mapped to the actual strand where the TFBS is located
+
+```{r collapse=TRUE}
+# Function to adjust y positions in case of overlaps on the same strand
+adjust_y_positions <- function(df) {
+  df <- df %>% arrange(start)
+  
+  if (nrow(df) > 1) {  # Ensure there's more than one element to compare
+    for (i in 2:nrow(df)) {
+      for (j in 1:(i-1)) {
+        if (df$start[i] <= df$end[j] && df$end[i] >= df$start[j]) {
+          # If there's an overlap, adjust the y_position
+          df$y_position[i] <- df$y_position[j] + ifelse(df$strand[i] == "+", 0.5, -0.5)
+        }
+      }
+    }
+  }
+  
+  return(df)
+}
+```
+
+#### Modern
+
+```{r fig.width=10, fig.height=6, collapse=TRUE}
+# Define the sequences as character strings
+modern_seq <- as.character(dna_modern_seq)
+modern_rev_seq <- as.character(Biostrings::complement(dna_modern_seq))
+
+# Create a data frame for the DNA sequences
+dna_df <- data.frame(
+  Position = 1:nchar(modern_seq),
+  modern = unlist(strsplit(modern_seq, "")),
+  modern_Rev = unlist(strsplit(modern_rev_seq, ""))
+)
+
+# Adjust y positions for plotting
+dna_df$y_modern <- 1
+dna_df$y_modern_rev <- 0
+
+# Create a binding_elements data frame using the provided data
+binding_elements <- TFBS_overlapping_all[TFBS_overlapping_all$seqname == 'modern.41bp', ]
+
+# Initialize y_position based on strand
+binding_elements <- binding_elements %>%
+  mutate(
+    y_position = ifelse(strand == "+", 1.5, -0.5),
+    strand = as.character(strand))
+
+# Apply the adjustment function to the binding elements dataframe for both strands
+binding_elements <- binding_elements %>%
+  group_by(seqname, strand) %>%
+  do(adjust_y_positions(.)) %>%
+  ungroup()
+
+# Adjust y-axis limits dynamically based on the data
+y_limits <- c(min(binding_elements$y_position) - 2, max(binding_elements$y_position) + 0.5)
+
+#y_limits <- c(-1, 5)  # Set wider y-axis limits to ensure both strands are visible
+```
+
+```{r fig.width=10, fig.height=7, collapse=TRUE}
+# Plotting the DNA sequences and binding elements
+modern_plot <- ggplot() +
+  geom_text(data = dna_df, aes(x = Position, y = y_modern, label = modern),
+                               color = ifelse(dna_df$Position == 21, "red", "black"), size = 5, family = "Courier",
+            hjust = 0.5, vjust = 0.5) +
+  geom_text(data = dna_df, aes(x = Position, y = y_modern_rev, label = modern_Rev), 
+                               color = ifelse(dna_df$Position == 21, "red", "black"), size = 5, family = "Courier",
+            hjust = 0.5, vjust = 0.5) +
+  geom_segment(data = binding_elements, aes(x = start, xend = end, y = y_position, yend = y_position, color = TF), 
+               size = 2) +
+  geom_point(data = binding_elements, aes(x = start, y = y_position, color = TF), 
+             size = 3) +
+  geom_point(data = binding_elements, aes(x = end, y = y_position, color = TF), 
+             size = 3) +
+  theme_minimal(base_size = 12) +
+  theme(axis.title = element_blank(),
+        plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x.top = element_text()) +  # Make sure the top axis text is visible
+  scale_x_continuous(
+    breaks = seq(1, nchar(modern_seq), 2),
+    sec.axis = dup_axis(name = NULL)  # Adds a secondary x-axis at the top
+  ) +
+  ylim(y_limits) +  # Dynamically set ylim based on adjusted y_positions
+  scale_color_manual(values = tf_colors) +
+  coord_fixed(ratio = 2.5)  # Adjust the ratio to compress the y-axis
+
+modern_plot
+```
+
+
+#### Ancestral
+
+```{r fig.width=10, fig.height=10, collapse=TRUE}
+# Define the sequences as character strings
+ancestral <- as.character(dna_ancestral_seq)
+ancestral_rev_seq <- as.character(Biostrings::complement(dna_ancestral_seq))
+
+# Create a data frame for the DNA sequences
+dna_df <- data.frame(
+  Position = 1:nchar(ancestral),
+  ancestral = unlist(strsplit(ancestral, "")),
+  ancestral_Rev = unlist(strsplit(ancestral_rev_seq, ""))
+)
+
+# Adjust y positions for plotting
+dna_df$y_ancestral <- 1
+dna_df$y_ancestral_rev <- 0
+
+# Create a binding_elements data frame using the provided data
+binding_elements <- TFBS_overlapping_all[TFBS_overlapping_all$seqname == 'ancestral.41bp', ]
+
+# Initialize y_position based on strand
+binding_elements <- binding_elements %>%
+  mutate(
+    y_position = ifelse(strand == "+", 1.5, -0.5),
+    strand = as.character(strand))
+
+# Apply the adjustment function to the binding elements dataframe for both strands
+binding_elements <- binding_elements %>%
+  group_by(seqname, strand) %>%
+  do(adjust_y_positions(.)) %>%
+  ungroup()
+
+# Adjust y-axis limits dynamically based on the data
+y_limits <- c(min(binding_elements$y_position) - 0.5, max(binding_elements$y_position) + 0.5)
+```
+
+```{r fig.width=10, fig.height=7, collapse=TRUE}
+# Plotting the DNA sequences and binding elements
+ancestral_plot <- ggplot() +
+  geom_text(data = dna_df, aes(x = Position, y = y_ancestral, label = ancestral), 
+                               color = ifelse(dna_df$Position == 21, "red", "black"), size = 5, family = "Courier",
+            hjust = 0.5, vjust = 0.5)  +
+  geom_text(data = dna_df, aes(x = Position, y = y_ancestral_rev, label = ancestral_Rev), 
+                               color = ifelse(dna_df$Position == 21, "red", "black"), size = 5, family = "Courier",
+            hjust = 0.5, vjust = 0.5)  +
+  geom_segment(data = binding_elements, aes(x = start, xend = end, y = y_position, yend = y_position, color = TF), 
+               size = 2) +
+  geom_point(data = binding_elements, aes(x = start, y = y_position, color = TF), 
+             size = 3) +
+  geom_point(data = binding_elements, aes(x = end, y = y_position, color = TF), 
+             size = 3) +
+  theme_minimal(base_size = 12) +
+  theme(axis.title = element_blank(),
+        plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x.top = element_text()) +  # Make sure the top axis text is visible
+  scale_x_continuous(
+    breaks = seq(1, nchar(ancestral), 2),
+    sec.axis = dup_axis(name = NULL)  # Adds a secondary x-axis at the top
+  ) +
+  ylim(y_limits) +  # Dynamically set ylim based on adjusted y_positions
+  scale_color_manual(values = tf_colors) +
+  coord_fixed(ratio = 2.5)  # Adjust the ratio to compress the y-axis
+
+ancestral_plot
+```
+
+### ScatterPlot TFBS scores
+
+```{r fig.width=8, fig.height=5}
+data <- TFBS_overlapping_all
+
+# Add column pasting score, seq, strand
+data <- data %>%
+  mutate(score_name = paste0("score_", seqname, strand))
+
+# Reshape the data to have one row per TF and columns for each score
+widened_data <- data %>%
+  select(TF, score_name, score) %>% # Keep only relevant columns
+  pivot_wider(names_from = score_name, values_from = score)
+
+# Split by strand
+widened_data_fwstrand <- widened_data[, c(1, 2, 5)]
+widened_data_rvstrand <- widened_data[, c(1, 3, 4)]
+
+# Give better column names
+colnames(widened_data_fwstrand) <- c('TF', 'score_modern', 'score_ancestral')
+colnames(widened_data_rvstrand) <- c('TF', 'score_modern', 'score_ancestral')
+
+# Replace NA with zero
+widened_data_fwstrand <- widened_data_fwstrand %>%
+  mutate(across(everything(), ~ replace_na(., 0)))
+
+widened_data_rvstrand <- widened_data_rvstrand %>%
+  mutate(across(everything(), ~ replace_na(., 0)))
+
+# Add strand column
+widened_data_fwstrand$strand <- 'forward'
+widened_data_rvstrand$strand <- 'reverse'
+
+# Rebind rows
+widened_data_bothstrands <- rbind(widened_data_fwstrand, widened_data_rvstrand)
+
+# Add transparency column for plotting
+widened_data_bothstrands <- widened_data_bothstrands %>%
+    mutate(alpha = ifelse(score_modern == score_ancestral, 0.5, 1)) # Adjust transparency to map alpha globally with alpha=alpha in aes
+
+
+ggplot(widened_data_bothstrands, aes(x = score_modern, y = score_ancestral, alpha = alpha)) +
+  geom_point() +  # Points inherit alpha
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  geom_text_repel(aes(label = TF), size = 3, max.overlaps = Inf, show.legend = FALSE) + # Labels inherit alpha
+  scale_alpha_identity() +  # Use alpha values as-is
+  theme_bw() +
+  theme(axis.text = element_text(size=11, color='black'),
+        strip.background = element_rect(fill=NA)) +
+  facet_wrap(~strand) +
+  expand_limits(
+    x = c(min(widened_data_bothstrands$score_modern, na.rm = TRUE),
+          max(widened_data_bothstrands$score_modern, na.rm = TRUE)),
+    y = c(min(widened_data_bothstrands$score_ancestral, na.rm = TRUE),
+          max(widened_data_bothstrands$score_ancestral, na.rm = TRUE))
+  ) +
+  labs(x = "Modern Score", y = "Ancestral Score")
+```
+
+***
+
+**sessionInfo**
+
+```{r collapse=TRUE}
+sessionInfo()
+```
+
+last update on `r date()`
+
