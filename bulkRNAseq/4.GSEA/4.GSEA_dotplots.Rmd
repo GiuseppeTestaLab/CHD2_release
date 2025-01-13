@@ -1,0 +1,175 @@
+---
+title: "Gene Set Enrichment Analysis Figures"
+author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        theme: 'cosmo'
+        highlight: 'kate'
+        code_folding: hide
+params: 
+    Dataset: 'CHD2_iPSCs_and_organoids_PublicRepo'
+    SE: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/1.Exploratory/Output/Savings/CHD2_iPSCs_and_organoidsSE_Bio.rds'
+    AutophagyDF: '/group/testa/Project/CHD2/BulkRNAseq/data/GeneSets/Autophagy.txt'
+    InputFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/4.GSEA/Output/Savings'
+    
+---
+
+```{r collapse=TRUE}
+library(clusterProfiler)
+library(AnnotationDbi)
+library(ggplot2)
+library(enrichplot)
+library(viridis)
+library(forcats)
+```
+
+### Load GSEA results
+```{r collapse=TRUE}
+results_ancestral <- readRDS(paste0(params$InputFolder, 'GSEA_Ancestral_results.Rds'))
+results_heterozygous <- readRDS(paste0(params$InputFolder, 'GSEA_Heterozygous_results.Rds'))
+```
+
+### Join results
+```{r}
+res_ancestral_df <- data.frame('Category' = c('Autophagy core', 'Lysosome'),
+           'Enrichment score' = c(results_ancestral$iPSCs_AR@result$enrichmentScore[1], results_ancestral$iPSCs_AR@result$enrichmentScore[2]),
+           'NES' = c(results_ancestral$iPSCs_AR@result$NES[1], results_ancestral$iPSCs_AR@result$NES[2]),
+           'qvalues' = c(results_ancestral$iPSCs_AR@result$qvalues[1], results_ancestral$iPSCs_AR@result$qvalues[2]),
+           'setSize' = c(results_ancestral$iPSCs_AR@result$setSize[1], results_ancestral$iPSCs_AR@result$setSize[2]),
+           'Genotype' = 'AR')
+
+res_heterozygous_df <- data.frame('Category' = c('Autophagy core', 'Lysosome'),
+           'Enrichment score' = c(results_heterozygous$iPSCs_HT@result$enrichmentScore[1], results_heterozygous$iPSCs_HT@result$enrichmentScore[2]),
+           'NES' = c(results_heterozygous$iPSCs_HT@result$NES[1], results_heterozygous$iPSCs_HT@result$NES[2]),
+           'qvalues' = c(results_heterozygous$iPSCs_HT@result$qvalues[1], results_heterozygous$iPSCs_HT@result$qvalues[2]),
+           'setSize' = c(results_heterozygous$iPSCs_HT@result$setSize[1], results_heterozygous$iPSCs_HT@result$setSize[2]),
+           'Genotype' = 'HT')
+
+
+res_ipsc <- rbind(res_ancestral_df, res_heterozygous_df)
+```
+
+```{r}
+ggplot(res_ipsc, aes(y=Genotype, x=Category, size=NES, fill=Genotype)) +
+  geom_point(aes(fill=Genotype), color='black', pch=21) +
+  theme_bw() +
+  scale_fill_manual(values=c('HT' = 'red', 'AR' = 'blue'))
+
+
+ggplot(res_ipsc, aes(y=Genotype, x=Category, fill=qvalues, size=NES)) +
+  geom_point(color='black', pch=21) +
+  theme_bw() +
+  scale_fill_viridis(discrete = FALSE)
+```
+
+```{r}
+ggplot(res_ipsc, aes(y=Genotype, x=Category, fill=qvalues, size=NES)) +
+  geom_point(color='black', pch=21) +
+  theme_bw() +
+  #scale_fill_distiller(palette = "RdBu", direction = 1, limits=c(0,1), na.value="grey80") +  # Narrow color space
+  scale_size_continuous(breaks = c(1.6, 1.7, 1.8), limits = c(1.6, 1.8)) +  # Custom legend ticks for NES
+  theme(
+    axis.text = element_text(size = 14, color = 'black'),  # Increase axis text size and make black
+    axis.title.x = element_blank(),  # Remove x-axis title
+    axis.title.y = element_blank(),  # Remove y-axis title
+    legend.title = element_text(color = 'black'),  # Black legend title
+    legend.text = element_text(color = 'black')    # Black legend text
+  )
+```
+
+
+* Y-Axis: Gene sets (ID or Description)
+* X-Axis: NES (Normalized Enrichment Score)
+* Dot Size: Gene set size (setSize)
+*	Dot Color: FDR (q-values)
+	
+	
+```{r fig.width=10, fig.height=3, dpi=600}
+ggplot(res_ipsc, aes(y=Category, x=Genotype, fill=qvalues, size=NES)) +
+  geom_point(color='black', pch=21, stroke=.75) +
+  theme_bw() +
+  scale_x_discrete(labels = c("Ancestral", "Heterozygous"), expand = c(0.6, 0.1)) +
+  scale_y_discrete(labels = c('Lysosomal genes', 'Autophagy core genes'), expand = c(0.6, 0.1)) +
+  labs(fill = 'q-value', size = 'Normalized enrichment score') +
+  scale_fill_gradient(low = "#f73452", high = "#a02336") + 
+  scale_size_continuous(range = c(3, 10)) +  # Ensure the range matches your plot sizes
+  guides(size = guide_legend(
+    title = "NES",
+    override.aes = list(size = c(3, 6, 10, 12)))) +   # Define a consistent range of sizes for the legend
+  theme(
+    axis.text = element_text(size = 14, color = 'black'), 
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    legend.title = element_text(color = 'black'),
+    legend.text = element_text(color = 'black'),
+    panel.grid = element_blank(),
+    panel.border = element_rect(color='black')) +
+  coord_fixed(ratio=.3)
+
+ggsave(filename = paste0('/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/4.GSEA/Output/Figures/', 'GSEA_iPSCs_dotplot.pdf'), width = 10, height = 3)
+```
+
+
+```{r}
+build_gsea_df <- function(results_object, key) {
+  # Extract the relevant result dataframe using the provided key
+  result_data <- results_object[[key]]@result
+  
+  # Extract the category names (these are in the 'ID' column of the result)
+  categories <- result_data$ID
+  
+  # Create a dataframe dynamically using the parsed category names and matching values
+  res_df <- data.frame(
+    'Category' = categories,
+    'Enrichment score' = result_data$enrichmentScore[match(categories, result_data$ID)], # Ensure matching by category
+    'NES' = result_data$NES[match(categories, result_data$ID)],
+    'qvalues' = result_data$qvalues[match(categories, result_data$ID)],
+    'setSize' = result_data$setSize[match(categories, result_data$ID)],
+    'Genotype' = key
+  )
+  
+  return(res_df)
+}
+```
+
+```{r}
+res_iPSC_AR <- build_gsea_df(results_ancestral, "iPSCs_AR")
+res_d25_AR <- build_gsea_df(results_ancestral, "Day25_CbO_AR")
+res_d50_AR <- build_gsea_df(results_ancestral, "Day50_CbO_AR")
+
+res_iPSC_HT <- build_gsea_df(results_heterozygous, "iPSCs_HT")
+res_d25_HT <- build_gsea_df(results_heterozygous, "Day25_CbO_HT")
+res_d50_HT <- build_gsea_df(results_heterozygous, "Day50_CbO_HT")
+
+res_all <- rbind(res_iPSC_AR, res_iPSC_HT, res_d25_AR, res_d25_HT, res_d50_AR, res_d50_HT)
+res_orgs <- rbind(res_d25_AR, res_d25_HT, res_d50_AR, res_d50_HT)
+```
+
+
+```{r fig.width=9, fig.height=7}
+res_orgs$Category <- factor(res_orgs$Category, levels = unique(res_orgs$Category))
+
+ggplot(res_orgs, aes(y=fct_rev(Category), x=Genotype, fill=qvalues, size=NES)) +
+  geom_point(color='black', pch=21, stroke=.75) +
+  theme_bw() +
+  labs(fill = 'q-value', size = 'Normalized enrichment score') +
+  scale_fill_gradient(low = "#7EC8E3", high = "#D4F1F4") +
+  scale_x_discrete(labels = c("Day25 ancestral organoids", "Day25 Heterozygous organoids",
+                              "Day50 ancestral organoids", "Day50 Heterozygous organoids")) +
+  scale_size_continuous(range = c(3, 10)) +  # Ensure the range matches your plot sizes
+  theme(
+    axis.text = element_text(size = 13, color = 'black'), 
+    axis.text.x = element_text(angle=45, hjust = 1),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    legend.title = element_text(color = 'black'),
+    legend.text = element_text(color = 'black'),
+    panel.grid = element_blank(),
+    panel.border = element_rect(color='black'))
+
+ggsave(filename = paste0('/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/4.GSEA/Output/Figures/', 'GSEA_Organoids_dotplot.pdf'), width = 10, height = 5)
+```
+

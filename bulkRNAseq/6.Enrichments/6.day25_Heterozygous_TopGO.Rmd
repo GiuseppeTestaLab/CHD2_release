@@ -1,0 +1,460 @@
+---
+title: "Gene Ontology Analysis Day 25 HT CbO"
+author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+    html_document:
+        keep_md: no
+        toc: true
+        toc_float: true
+        theme: 'cosmo'
+        highlight: 'kate'
+        code_folding: hide
+params: 
+    Dataset: 'CHD2_iPSCs_and_organoids_PublicRepo'
+    SEFile: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/day25/Output/Savings/day25CbO.SE_deseq2_HT.rds'
+    DEAList: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/day25/Output/Savings/day25CbO.DEAList_HT.rds'
+    HT: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/day25/Output/Savings/day25CbO.deseqHTvsWT.rds'
+    SavingFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/6.Enrichments/day25/Output/Savings/'
+    FiguresFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/6.Enrichments/day25/Output/Figures/'
+    FDRthr: 0.05 # FDR threshold for DEG selection
+    logFCthr: 0.55 # logFC threshold for DEG selection
+    TopGO: 'BP_MF_CC' #GO domains
+    GoEnTh: 1.0 #enrichment threshold for TopGO results
+    GoPvalTh: 0.05 #pval threshold for TopGO results
+    NbName: "TopGO_day25_HT"
+    SaveImages: FALSE
+---
+
+
+# Gene Onoltogy Analysis on **day25 Heterozygous**
+
+
+## 1. Environment Set Up
+
+```{r EnvironmentSetupI, collapse=TRUE}
+for (i in 1:length(params))
+  print(paste('Parameter:', names(params)[i], ' - Value:', params[[i]], '- Class:', class(params[[i]])))
+```
+
+ * Dataset: name of the dataset that is processed. 
+ * SE: input file containing differential expression results from DESeq2 (absolute path). 
+ * FDRthr: threshold on False Discovery Rate. Default 0.05.
+ * logFCthr: threshold on False Discovery Rate. Default 1.5.
+ * SavingFolder: directory where produced files will be written (absolute path). Default is getwd().
+ * TopGO: string that specify the ontology domains to be analysed. Default BP and MF; also CC can be added.
+
+
+```{r EnvironmentSetupII, collapse=TRUE}
+library(RNASeqBulkExploratory)
+library(SummarizedExperiment)
+library(tidyr)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(topGO)
+library(sechm)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(RColorBrewer)
+library(cowplot)
+library(data.table)
+source('/group/testa/Users/oliviero.leonardi/myProjects/CHD2/BulkRNAseq/ContainerHome/CHD2_organoids/NoGradientBarplots.R')
+```
+
+
+```{r FolderSetting}
+Dataset <- params$Dataset
+logFCthr <- params$logFCthr
+FDRthr <- params$FDRthr
+
+FdrTh <- FDRthr
+logFcTh <- logFCthr
+
+SavingFolder <- ifelse(is.null(params$SavingFolder), getwd(), params$SavingFolder)
+FiguresFolder <- ifelse(is.null(params$FiguresFolder), getwd(), params$FiguresFolder)
+
+
+if (dir.exists(SavingFolder) == FALSE) {
+  dir.create(SavingFolder, recursive=TRUE)
+}
+```
+
+
+****
+
+## 2. Data Upload
+
+ * Summarized Experiment object containing expression data used for DEA and gene and sample metadata  
+ * DEA object, containing results of the differential expression
+
+
+### 2.1 Load Data from DEA
+
+```{r Data, collapse=TRUE}
+#SE object coming from DEA, but not containing specific contrast results
+SE_DEA <- readRDS(params$SEFile)
+
+SE_DEA <- SE_DEA[rowData(SE_DEA)$GeneName != '', ]
+rownames(SE_DEA) <- rowData(SE_DEA)$GeneName
+
+# List with differential expression results (all time-points)
+DEA <- readRDS(params$DEAList)
+```
+
+```{r collapse=TRUE}
+colvector <- c("#5ec962", "#e95462", "#2c728e")
+names(colvector) <- c('All', 'Up',  'Down')
+```
+
+
+### 2.2 Add DEA results to SE
+
+```{r, collapse=TRUE}
+if(! identical(rownames(SE_DEA), row.names(DEA$HT$res))){
+  stop('Expression data in SE and results from differential espression analysis are inconsistent.')
+}
+
+SE_DEA <- mergeDeaSE(SE_DEA, DEA$HT$res, subsetRowDataCols=NULL,
+                     logFcCol='log2FoldChange', FdrCol='padj') #specify
+```
+
+
+__`r dim(rowData(SE_DEA))[1]`__ genes in __`r dim(colData(SE_DEA))[1]`__ samples have been testes for differential expression. 
+
+The following number of genes are identified as differentially expressed:
+
+ * FDR < 0.1: __`r dim(dplyr::filter(data.frame(rowData(SE_DEA)), FDR < 0.1))[1]`__ differentially expressed genes
+ * FDR < 0.05: __`r dim(dplyr::filter(data.frame(rowData(SE_DEA)), FDR < 0.05))[1]`__ differentially expressed genes
+ * FDR < 0.05 and FC > 1.5: __`r dim(dplyr::filter(data.frame(rowData(SE_DEA)), FDR < 0.05 & abs(logFC) > log2(1.5)))[1]`__ differentially expressed genes
+ * FDR < 0.05 and FC > 2: __`r dim(dplyr::filter(data.frame(rowData(SE_DEA)), FDR < 0.05 & abs(logFC) > log2(2)))[1]`__ differentially expressed genes
+ 
+Imposing a threshold of `r logFCthr` on the Log2FC and `r FDRthr` on the FDR (as specified in parameters), __`r dim(dplyr::filter(data.frame(rowData(SE_DEA)), FDR < FDRthr & abs(logFC) > log2(logFCthr)))[1]`__ genes are selected:  __`r dim(dplyr::filter(data.frame(rowData(SE_DEA)), FDR < FDRthr & logFC > log2(logFCthr)))[1]`__ up-regulated genes and __`r dim(dplyr::filter(data.frame(rowData(SE_DEA)), FDR < FDRthr & logFC < -log2(logFCthr)))[1]`__ down-regulated genes. 
+ 
+
+
+****
+
+## 3. RESULTS NAVIGATION: Interactive Table
+
+An interactive table show the results for all DEGs (ranked according to FDR). A table of all DEGs can be downloaded from here.
+
+From topTag I generate an interactive table for result interrogation with link to the Gene Cards. __The table reports all the genes having a FDR < `r FDRthr` and a Log2FC > `r logFCthr`__ as absolute value, according to the threshold settings. 
+
+
+```{r}
+DEGsTable(SE_DEA, FdrTh=FdrTh, logFcTh=logFCthr, maxGenes=Inf, saveDEGs=FALSE)
+```
+
+
+****
+
+## 4. RESULTS VISUALIZATION
+
+### 4.1 Volcano plot
+
+The results of the differential expression analysis are visualized by Volcano plot. An interactive version is included in the html (only genes with FDR < threshold), while a static version is saved.  
+
+```{r Volcano, fig.align='center', fig.width=12, fig.height=12}
+plotVolcanoSE(SE=SE_DEA, FdrTh=FDRthr, logFcTh=logFCthr, 
+              FdrCeil=1e-10, logFcCeil=4, Interactive = FALSE)
+```
+
+***
+
+```{r VolcanoInt, fig.align='center', fig.width=12, fig.height=12}
+plotVolcanoSE(SE=SE_DEA, FdrTh=FDRthr, logFcTh=logFCthr, 
+              FdrCeil=1e-10, logFcCeil=4, Interactive = TRUE)
+```
+
+***
+
+### 4.2 Heatmap for significant genes 
+
+Heatmaps for DEGs, showing scaled vst values. 
+
+```{r}
+DEGs <- dplyr::filter(data.frame(rowData(SE_DEA)), FDR < FDRthr & abs(logFC) > log2(logFCthr))
+ScaledCols <- c('darkblue', "purple","white","lightgoldenrod1", 'goldenrod1')
+```
+
+```{r DEGsHeatmap, fig.width=12, fig.height=12}
+# sechm::sechm(SE_DEA, genes=DEGs$GeneName, assayName="vst", gaps_at="Genotype", show_rownames=FALSE,
+#       top_annotation=c('Genotype'), hmcols=ScaledCols, show_colnames=TRUE,
+#       do.scale=TRUE, breaks=0.85, column_title = "Scaled Vst Values")
+```
+
+
+
+## 5. TOPGO for Gene Ontology Enrichment analysis
+
+Gene ontology enrichment analysis is performed on the set of `r dim(dplyr::filter(data.frame(rowData(SE_DEA)), FDR < FDRthr & abs(logFC) > log2(logFCthr)))[1]` genes using TopGO with Fisher statistics and weight01 algorithm. 
+
+For each specified domain of the ontology: 
+
+ * Enrichment analysis on all DEGs or splitted in down- and up-regulated 
+
+
+### 5.1 Selection of modulated genes and generation of gene vectors
+
+I generate vectors for the gene universe, all modulated genes, up-regulated genes and down-regulated genes in the format required by TopGo.
+
+```{r TopGOSetI}
+GeneVectors <- topGOGeneVectors(SE_DEA, FdrTh=FDRthr, logFcTh=logFCthr)
+```
+
+
+Therefore: 
+
+ * universe genes: __`r length(GeneVectors$DEGenes)`__ genes
+ * modulated genes: __`r table(GeneVectors$DEGenes)['1']`__ genes
+ * down-regulated genes:  __`r table(GeneVectors$DEGenesDown)['1']`__  genes of interest
+ * up-regulated genes:  __`r table(GeneVectors$DEGenesUp)['1']`__ genes of interest  
+
+
+Then I set parameters according to the gene ontology domains to be evaluated. By default, Biological Process and Molecular Function domains are interrogated.
+
+
+```{r TopGOSetII}
+BpEval <- ifelse(length(grep('BP', params$TopGO))!=0, TRUE, FALSE)
+MfEval <- ifelse(length(grep('MF', params$TopGO))!=0, TRUE, FALSE)
+CcEval <- ifelse(length(grep('CC', params$TopGO))!=0, TRUE, FALSE)
+```
+
+### 5.2 TopGO analysis: Biological Process
+
+On the basis of the analysis settings, the enrichment for Biological Process __`r ifelse(BpEval==TRUE, 'IS', 'IS NOT')` performed__.
+
+#### __Biological Process Analysis for ALL modulated genes__: `r length(GeneVectors$DEGenes[GeneVectors$DEGenes==1])` genes
+
+
+```{r BPannotation, eval=BpEval, collapse=TRUE}
+# I generate a list that contains the association between each gene and the GO terms that are associated to it
+BPannHT <- topGO::annFUN.org(whichOnto="BP", feasibleGenes=names(GeneVectors$DEGenes), 
+                    mapping="org.Hs.eg.db", ID="symbol") %>% inverseList()
+
+# Wrapper function for topGO analysis (see helper file)
+ResBPAllHT <- topGOResults(Genes=GeneVectors$DEGenes, gene2GO=BPannHT, ontology='BP', 
+                         desc=NULL, nodeSize=5, algorithm='weight01', statistic='fisher', 
+                         EnTh=params$GoEnTh, PvalTh=params$GoPvalTh, minTerms=15, geneTh=4,
+                         saveRes=TRUE, fileName='BPAllHT', outDir=SavingFolder) 
+```
+
+#### __Biological Process Analysis for DOWN-REGULATED genes__: `r length(GeneVectors$DEGenesDown[GeneVectors$DEGenesDown==1])` genes
+
+```{r BPDown, eval=BpEval, collapse=TRUE}
+# Wrapper function for topGO analysis (see helper file)
+ResBPDownHT <- topGOResults(Genes=GeneVectors$DEGenesDown, gene2GO=BPannHT, ontology='BP', 
+                          desc=NULL, nodeSize=5, algorithm='weight01', statistic='fisher', 
+                          EnTh=params$GoEnTh, PvalTh=params$GoPvalTh, minTerms=15, geneTh=4,
+                          saveRes=TRUE, fileName='BPDownHT', outDir=paste0(SavingFolder)) 
+
+# Selection on enrichment of at least 2 is implemented (also to avoid depleted categories). Then categories are ranked by PVal and all the ones with Pval < th are selected. If the number is < minTerms, othter terms are included to reach the minimum number. 
+```
+
+
+```{r BPDownII, eval=BpEval, collapse=TRUE}
+GOTable(ResBPDownHT$ResSel, maxGO=20)
+```
+
+#### __Biological Process Analysis for UP-REGULATED genes__: `r length(GeneVectors$DEGenesUp[GeneVectors$DEGenesUp==1])` genes
+
+```{r BPUp, eval=BpEval, collapse=TRUE}
+ResBPUpHT <- topGOResults(Genes=GeneVectors$DEGenesUp, gene2GO=BPannHT, ontology='BP', 
+                        desc=NULL, nodeSize=5, algorithm='weight01', statistic='fisher', 
+                        EnTh=params$GoEnTh, PvalTh=params$GoPvalTh, minTerms=15, geneTh=4,
+                        saveRes=TRUE, fileName='BPUpHT', outDir=SavingFolder) 
+
+#dir.create(paste0(SavingFolder, 'TopGO/BPUp'), recursive=TRUE)
+#GOAnnotation(ResBPUp$ResSel, GOdata=ResBPUp$GOdata, SavingFolder=paste0(SavingFolder, 'TopGO/BPUp'), keytype='SYMBOL')
+```
+
+```{r BPUpII, eval=BpEval, collapse=TRUE}
+GOTable(ResBPUpHT$ResSel, maxGO=20)
+```
+
+#### __Result visualization: Barplot__
+
+```{r BPBarplot, eval=BpEval, collapse=TRUE, fig.height=8.5, fig.width=16, fig.path=FiguresFolder}
+topGOBarplotAll(TopGOResAll=ResBPAllHT$ResSel, TopGOResDown=ResBPDownHT$ResSel, TopGOResUp = ResBPUpHT$ResSel,
+                terms=12, pvalTh=0.05, plotTitle=NULL, gradient = FALSE, cols = colvector)
+```
+
+
+### 5.3 TopGO analysis: Molecular Function
+
+On the basis of the analysis settings, the enrichment for Molecular Function __`r ifelse(MfEval==TRUE, 'IS', 'IS NOT')` performed__.
+
+#### __Molecular Function Enrichment for ALL modulated genes__: `r length(GeneVectors$DEGenes[GeneVectors$DEGenes==1])` genes
+
+```{r MFAll, eval=MfEval, collapse=TRUE}
+# I generate a list that contains the association between each gene and the GO terms that are associated to it
+MFannHT <- topGO::annFUN.org(whichOnto='MF', feasibleGenes=names(GeneVectors$DEGenes), 
+                           mapping='org.Hs.eg.db', ID='symbol') %>% inverseList()
+
+# Wrapper function for topGO analysis (see helper file)
+ResMFAllHT <- topGOResults(Genes=GeneVectors$DEGenes, gene2GO=MFannHT, ontology='MF', 
+                         desc=NULL, nodeSize=5, algorithm='weight01', statistic='fisher', 
+                         EnTh=params$GoEnTh, PvalTh=params$GoPvalTh, minTerms=15, geneTh=4,
+                         saveRes=TRUE, fileName='MFAllHT', outDir=SavingFolder) 
+```
+
+
+
+#### __Molecular Function Enrichment for DOWN-REGULATED genes__: `r length(GeneVectors$DEGenesDown[GeneVectors$DEGenesDown==1])` genes
+
+```{r MFDown, eval=MfEval, collapse=TRUE}
+ResMFDownHT <- topGOResults(Genes=GeneVectors$DEGenesDown, gene2GO=MFannHT, ontology='MF', 
+                          desc=NULL, nodeSize=5, algorithm='weight01', statistic='fisher', 
+                          EnTh=params$GoEnTh, PvalTh=params$GoPvalTh, minTerms=15, geneTh=4,
+                          saveRes=TRUE, fileName='MFDownHT', outDir=SavingFolder) 
+
+#dir.create(paste0(SavingFolder, 'TopGO/MFDown'), recursive=TRUE)
+#GOAnnotation(ResMFDown$ResSel, GOdata=ResMFDown$GOdata, SavingFolder=paste0(SavingFolder, 'TopGO/MFDown'), keytype='SYMBOL')
+```
+
+```{r MFDownII, eval=MfEval, collapse=TRUE}
+GOTable(ResMFDownHT$ResSel, maxGO=20)
+```
+
+
+#### __Molecular Function Analysis for UP-REGULATED genes__: `r length(GeneVectors$DEGenesUp[GeneVectors$DEGenesUp==1])` genes
+
+```{r MFUp, eval=MfEval, collapse=TRUE}
+ResMFUpHT <- topGOResults(Genes=GeneVectors$DEGenesUp, gene2GO=MFannHT, ontology='MF', 
+                        desc=NULL, nodeSize=5, algorithm='weight01', statistic='fisher', 
+                        EnTh=params$GoEnTh, PvalTh=params$GoPvalTh, minTerms=15, geneTh=4,
+                        saveRes=TRUE, fileName='MFUpHT', outDir=SavingFolder)
+
+#dir.create(paste0(SavingFolder, 'TopGO/MFUp'), recursive=TRUE)
+#GOAnnotation(ResMFUp$ResSel, GOdata=ResMFUp$GOdata, SavingFolder=paste0(SavingFolder, 'TopGO/MFUp'), keytype='SYMBOL')
+```
+
+```{r MFUpII, eval=MfEval, collapse=TRUE}
+GOTable(ResMFUpHT$ResSel, maxGO=20)
+```
+
+
+#### __Result visualization: Barplot__
+
+```{r MFBarplot, eval=MfEval, collapse=TRUE, fig.height=8.5, fig.width=16, fig.path=FiguresFolder}
+topGOBarplotAll(TopGOResAll=ResMFAllHT$ResSel, TopGOResDown=ResMFDownHT$ResSel, TopGOResUp=ResMFUpHT$ResSel, 
+                terms=12, pvalTh=0.05, plotTitle=NULL, gradient = FALSE, cols = colvector)
+```
+
+
+### 5.4 TopGO analysis: Cellular Component
+
+On the basis of the analysis settings, the enrichment for Cellular Component __`r ifelse(CcEval==TRUE, 'IS', 'IS NOT')`__ performed.
+
+#### __Cellular Component Enrichment for ALL modulated genes__: `r length(GeneVectors$DEGenes[GeneVectors$DEGenes==1])` genes
+
+```{r CCAll, eval=CcEval, collapse=TRUE}
+# I generate a list that contains the association between each gene and the GO terms that are associated to it
+CCannHT <- topGO::annFUN.org(whichOnto='CC', feasibleGenes=names(GeneVectors$DEGenes), 
+                           mapping='org.Hs.eg.db', ID='symbol') %>% inverseList()
+
+# Wrapper function for topGO analysis (see helper file)
+ResCCAllHT <- topGOResults(Genes=GeneVectors$DEGenes, gene2GO=CCannHT, ontology='CC', 
+                         desc=NULL, nodeSize=5, algorithm='weight01', statistic='fisher', 
+                         EnTh=params$GoEnTh, PvalTh=params$GoPvalTh, minTerms=15, geneTh=4,
+                         saveRes=TRUE, fileName='CCAllHT', outDir=SavingFolder)
+
+#write.table(ResCCAll$ResAll, file=paste0(SavingFolder, 'TopGO/CCAllResults.txt'), sep='\t', row.names=FALSE)
+```
+
+
+#### __Cellular Component Enrichment for DOWN-REGULATED genes__: `r length(GeneVectors$DEGenesDown[GeneVectors$DEGenesDown==1])` genes
+
+```{r CCDown, eval=CcEval, collapse=TRUE}
+# Wrapper function for topGO analysis (see helper file)
+ResCCDownHT <- topGOResults(Genes=GeneVectors$DEGenesDown, gene2GO=CCannHT, ontology='CC', 
+                          desc=NULL, nodeSize=5, algorithm='weight01', statistic='fisher', 
+                          EnTh=params$GoEnTh, PvalTh=params$GoPvalTh, minTerms=15, geneTh=4,
+                          saveRes=TRUE, fileName='CCDownHT', outDir=SavingFolder)
+
+
+#dir.create(paste0(SavingFolder, 'TopGO/CCDown'), recursive=TRUE)
+#GOAnnotation(ResCCDown$ResSel, GOdata=ResCCDown$GOdata, SavingFolder=paste0(SavingFolder, 'TopGO/CCDown'), keytype='SYMBOL')
+```
+
+```{r CCDownII, eval=CcEval, collapse=TRUE}
+GOTable(ResCCDownHT$ResSel, maxGO=20)
+```
+
+
+#### __Cellular Component Analysis for UP-REGULATED genes__: `r length(GeneVectors$DEGenesUp[GeneVectors$DEGenesUp==1])` genes
+
+```{r CCUp, eval=CcEval, collapse=TRUE}
+# Wrapper function for topGO analysis (see helper file)
+ResCCUpHT <- topGOResults(Genes=GeneVectors$DEGenesUp, gene2GO=CCannHT, ontology='CC', 
+                        desc=NULL, nodeSize=5, algorithm='weight01', statistic='fisher', 
+                        EnTh=params$GoEnTh, PvalTh=params$GoPvalTh, minTerms=15, geneTh=4,
+                        saveRes=TRUE, fileName='CCUpHT', outDir=SavingFolder)
+
+
+#dir.create(paste0(SavingFolder, 'TopGO/CCUp'), recursive=TRUE)
+#GOAnnotation(ResCCUp$ResSel, GOdata=ResCCUp$GOdata, SavingFolder=paste0(SavingFolder, 'TopGO/CCUp'), keytype='SYMBOL')
+```
+
+```{r CCUpII, eval=CcEval, collapse=TRUE}
+GOTable(ResCCUpHT$ResSel, maxGO=20)
+```
+
+
+#### __Result visualization: Barplot__
+
+```{r CCBarplot, eval=CcEval, collapse=TRUE, fig.height=8.5, fig.width=16, fig.path=FiguresFolder}
+topGOBarplotAll(TopGOResAll=ResCCAllHT$ResSel, TopGOResDown=ResCCDownHT$ResSel, TopGOResUp=ResCCUpHT$ResSel,
+                terms=12, pvalTh=0.05, plotTitle=NULL, gradient = FALSE, cols = colvector)
+```
+
+****
+
+### 7. Savings
+
+Most of the useful information has been saved during the analysis. Here I save figures, workspace and information about the session.
+
+```{r SaveNbImages, eval=params$SaveImages}
+if (params$SaveImages == TRUE){   #Just in case since eval only works when knitting
+  #Set the folder paths
+  from <- paste(getwd(), paste(params$NbName, 'files/figure-html', sep='_'), sep='/')
+  to <- params$FiguresFolder
+
+  #Copy to output directory
+  file.copy(from, to, recursive = TRUE, copy.mode = TRUE)
+}
+```
+
+```{r collapse=TRUE}
+ResSelBP_HT <- list(ResSelAll = ResBPAllHT$ResSel,
+                    ResSelUp = ResBPUpHT$ResSel,
+                    ResSelDown = ResBPDownHT$ResSel)
+
+ResSelMF_HT <- list(ResSelAll = ResMFAllHT$ResSel,
+                    ResSelUp = ResMFUpHT$ResSel,
+                    ResSelDown = ResMFDownHT$ResSel)
+
+ResSelCC_HT <- list(ResSelAll = ResCCAllHT$ResSel,
+                    ResSelUp = ResCCUpHT$ResSel,
+                    ResSelDown = ResCCDownHT$ResSel)
+
+ResSel_HT <- list(BP = ResSelBP_HT,
+                  MF = ResSelMF_HT,
+                  CC = ResSelCC_HT)
+
+saveRDS(ResSel_HT, paste0(SavingFolder, '/day25CbO.', 'ResSel_HT.rds'))
+```
+
+```{r SaveSession}
+SessionInfo <- sessionInfo()
+Date <- date()
+
+save.image(paste0(SavingFolder, '/day25CbO.', 'FunctionalAnalysisWorkspace_HT.RData'))
+```
+
+***
+
+### **`r paste0('last update on: ', date())`**
+
+***

@@ -1,0 +1,165 @@
+---
+title: "Gene Set Enrichment Analysis"
+author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        theme: 'cosmo'
+        highlight: 'kate'
+        code_folding: hide
+params: 
+    Dataset: 'CHD2_iPSCs_and_organoids_PublicRepo'
+    SE: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/1.Exploratory/Output/Savings/CHD2_iPSCs_and_organoidsSE_Bio.rds'
+    AutophagyDF: '/group/testa/Project/CHD2/BulkRNAseq/data/GeneSets/Autophagy.txt'
+    InputFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/'
+    SavingFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/4.GSEA/Output/Savings'
+    
+---
+
+```{r collapse=TRUE}
+library(clusterProfiler)
+library(AnnotationDbi)
+library(ggplot2)
+library(enrichplot)
+```
+
+### Load DESeq2 results object
+```{r collapse=TRUE}
+deseq.ar.ipsc <- readRDS(paste0(params$InputFolder, 'iPSCs/Output/Savings/ipsc.deseqARvsWT.rds'))
+
+deseq.ar.d25 <- readRDS(paste0(params$InputFolder, 'day25/Output/Savings/day25CbO.deseqARvsWT.rds'))
+
+deseq.ar.d50 <- readRDS(paste0(params$InputFolder, 'day50/Output/Savings/day50CbO.deseqARvsWT.rds'))
+```
+
+### Make list of results dataframes
+```{r collapse=TRUE}
+deseqList <- list(deseq.ar.ipsc,
+                  deseq.ar.d25,
+                  deseq.ar.d50)
+
+names(deseqList) <- c('deseq.ar.ipsc',
+                  'deseq.ar.d25',
+                  'deseq.ar.d50')
+
+
+#deseqList <- lapply(deseqList, function(x) subset(x, abs(x$log2FoldChange) >= 1 | x$padj < 0.05))
+```
+
+### Build Term2Gene annotation
+```{r collapse=TRUE}
+AutophagyDF <- read.table(params$AutophagyDF, sep = '\t', header=TRUE)
+
+term2gene <- data.frame(term = AutophagyDF$Category, 
+                        gene = AutophagyDF$GeneSymbol)
+
+
+DT::datatable(AutophagyDF, class = "hover", rownames = FALSE, 
+        escape = FALSE, caption = "Autophagy Signature", filter = "top", 
+        options = list(pageLength = 10, autoWidth = TRUE, dom = "Bfrtip", 
+            buttons = list(c("csv", "excel"))))
+```
+
+### Build geneLists
+```{r collapse=TRUE}
+geneList <- list() #initialize
+
+for (i in 1:length(deseqList)) {
+  geneList[[i]] <- sort(deseqList[[i]][, 2], decreasing = TRUE) #sort by stat in descending order
+  names(geneList[[i]]) <- rownames(deseqList[[i]]) #set gene names
+}
+
+names(geneList) <- c('deseq.ar.ipsc',
+                  'deseq.ar.d25',
+                  'deseq.ar.d50')
+```
+
+### Run GSEA
+```{r collapse=TRUE}
+results <- list()
+
+for (i in 1:length(geneList)) {
+  results[[i]] <- GSEA(geneList[[i]], TERM2GENE = term2gene)
+}
+
+names(results) <- c('iPSCs_AR',
+                    'Day25_CbO_AR',
+                    'Day50_CbO_AR')
+```
+
+```{r collapse=TRUE}
+results
+```
+
+### iPSCs AR
+```{r fig.width=10, fig.height=7}
+paste0('Significant categories and adjusted pvalues for ', names(results)[1], ' are:')
+print(results$iPSCs_AR@result$Description)
+print(results$iPSCs_AR@result$p.adjust)
+
+data.frame(results[1])
+
+enrichplot::gseaplot2(results[[1]], geneSetID = 1)
+enrichplot::gseaplot2(results[[1]], geneSetID = 2)
+```
+
+
+### Day25 CbO AR
+```{r fig.width=10, fig.height=7}
+paste0('Significant categories and adjusted pvalues for ', names(results)[2], ' are:')
+print(results$Day25_CbO_AR@result$Description)
+print(results$Day25_CbO_AR@result$p.adjust)
+
+data.frame(results[2])
+
+enrichplot::gseaplot2(results[[2]], geneSetID = 1)
+enrichplot::gseaplot2(results[[2]], geneSetID = 2)
+enrichplot::gseaplot2(results[[2]], geneSetID = 3)
+# enrichplot::gseaplot2(results[[2]], geneSetID = 4)
+```
+
+
+### Day50 CbO AR
+```{r fig.width=10, fig.height=7}
+paste0('Significant categories and adjusted pvalues for ', names(results)[3], ' are:')
+print(results$Day50_CbO_AR@result$Description)
+print(results$Day50_CbO_AR@result$p.adjust)
+
+data.frame(results[3])
+
+enrichplot::gseaplot2(results[[3]], geneSetID = 1)
+enrichplot::gseaplot2(results[[3]], geneSetID = 2)
+```
+
+
+```{r collapse=TRUE}
+as.data.frame(results[1]) %>%
+  DT::datatable(class='hover', rownames=FALSE, caption='GSEA results for Ancestral iPSCs', 
+                filter='top', escape=TRUE, extension='Buttons',
+                options=list(pageLength=11, scrollX=T, dom='Bfrtip', buttons=list(I('colvis'))))
+
+as.data.frame(results[2]) %>%
+  DT::datatable(class='hover', rownames=FALSE, caption='GSEA results for Ancestral Day25 Cortical Organoids', 
+                filter='top', escape=TRUE, extension='Buttons',
+                options=list(pageLength=11, scrollX=T, dom='Bfrtip', buttons=list(I('colvis'))))
+
+as.data.frame(results[3]) %>%
+  DT::datatable(class='hover', rownames=FALSE, caption='GSEA results for Ancestral Day50 Cortical Organoids', 
+                filter='top', escape=TRUE, extension='Buttons',
+                options=list(pageLength=11, scrollX=T, dom='Bfrtip', buttons=list(I('colvis'))))
+```
+
+
+```{r}
+saveRDS(results, file = paste0(params$SavingFolder, 'GSEA_Ancestral_results.Rds'))
+```
+
+
+***
+
+### **`r paste0('last update on: ', date())`**
+
+***
+

@@ -1,0 +1,354 @@
+---
+title: "CHD2 Cortical Brain Organoids - DEGs overlap with NDD genes"
+author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        theme: 'cosmo'
+        highlight: 'kate'
+        code_folding: hide
+params:
+    GeneVect: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/7.NDDOverlap/Output/Savings/GeneVect.rds'
+    GeneSets: '/group/testa/Project/CHD2/BulkRNAseq/data/GeneSets/NDDoverlaps/'
+    DEAList_day25_HT: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/day25/Output/Savings/day25CbO.DEAList_HT.rds'
+    DEAList_day25_AR: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/day25/Output/Savings/day25CbO.DEAList_AR.rds'
+    DEAList_day50_HT: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/day50/Output/Savings/day50CbO.DEAList_HT.rds'
+    DEAList_day50_AR: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/day50/Output/Savings/day50CbO.DEAList_AR.rds'
+    SavingFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/7.NDDOverlap/Output/Savings/'
+    FiguresFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/7.NDDOverlap/Output/Figures/'
+    FDRthr: 0.05
+    logFCthr: 1.5
+---
+
+```{r collapse=TRUE}
+library(dplyr)
+library(ggplot2)
+library(UpSetR)
+library(ComplexHeatmap)
+library(viridis)
+library(RColorBrewer)
+library(colorRamp2)
+library(RNASeqBulkExploratory)
+```
+
+
+```{r collapse=TRUE}
+FDRthr <- params$FDRthr
+logFCthr <- params$logFCthr
+```
+
+
+```{r collapse=TRUE}
+res_day25 <- readRDS(file = '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/7.NDDOverlap/Output/Savings/day25_NDDOverlapResults.rds')
+res_day50 <-readRDS(file = '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/7.NDDOverlap/Output/Savings/day50_NDDOverlapResults.rds')
+```
+
+```{r collapse=TRUE}
+res_day25$Day <- 'Day25'
+res_day50$Day <- 'Day50'
+```
+
+***
+
+```{r collapse=TRUE}
+res <-  rbind(res_day50, res_day25)
+```
+
+```{r collapse=TRUE}
+res %>% DT::datatable(class='hover', rownames=TRUE, escape=TRUE, extension='Buttons', caption = 'All results from gene overlaps',
+                options=list(dom='Bfrtip', buttons=list(I('colvis'), 'excel')))
+```
+
+```{r collapse=TRUE}
+ResSel <- dplyr::filter(res, OR > 1 & Pval < 0.05)
+```
+
+```{r}
+ResSel %>% DT::datatable(class='hover', rownames=TRUE, escape=TRUE, extension='Buttons', caption = 'Results from gene overlaps with OR > 1 & PValue < 0.05',
+                options=list(dom='Bfrtip', buttons=list(I('colvis'), 'excel')))
+```
+
+***
+
+### NDD Overlap plot for SFARI genes
+
+```{r fig.width=6, fig.height=5, collapse=TRUE}
+cols <- viridis::cividis(100)[20:100]
+pastel_colors <- brewer.pal(3, "GnBu")
+
+ResSel$Day <- factor(ResSel$Day, levels = c('Day50', 'Day25'))
+ResSel <- ResSel %>% rename('OddsRatio' = OR,
+                             'Pvalue'= Pval)
+
+ggplot(ResSel, aes(Module, Day, label=Numbers)) + 
+  geom_point(aes(col=-log10(Pvalue), size=OddsRatio)) + 
+  geom_text() + 
+  scale_size_continuous(range=c(7, 15)) +
+  scale_color_gradientn(colors=pastel_colors) +
+  xlab('') + ylab('') +
+  theme_bw() +
+  labs(size = 'Odds Ratio') + 
+  theme(axis.text = element_text(size=12, color='black'))
+  
+ggsave(paste0(params$FiguresFolder, 'SFARI_Overlap.pdf'), width = 4, height = 4)
+
+# ggplot(ResSel, aes(Module, Day, label=Numbers)) + 
+#   geom_point(aes(col=-log10(Pval), size=OR)) + 
+#   geom_text() + 
+#   scale_size_continuous(range=c(1, 20), limits=c(-log10(0.05), 10)) +
+#   #scale_color_viridis_c(limits=c(1, 2), begin=0.4) + xlab('') + ylab('') +
+#   theme_bw() +
+#   theme(axis.text = element_text(size=12, color='black'))
+```
+
+
+```{r collapse=TRUE}
+GeneVect <- readRDS(params$GeneVect)
+```
+
+
+```{r collapse=TRUE}
+# Read DEA results into a list and filter for logFCthr & FDRthr
+
+DEAList_day25_HT <- readRDS(params$DEAList_day25_HT)
+DEAList_day25_AR <- readRDS(params$DEAList_day25_AR)
+DEAList_day50_HT <- readRDS(params$DEAList_day50_HT)
+DEAList_day50_AR <- readRDS(params$DEAList_day50_AR)
+
+
+DEA <- list()
+
+DEA$DEGs_HT_day25 <-  row.names(data.frame(DEAList_day25_HT$HT$res) %>% 
+                            dplyr::filter(abs(DEAList_day25_HT$HT$res$log2FoldChange) > log2(logFCthr), 
+                                          DEAList_day25_HT$HT$res$padj < FDRthr)) 
+
+DEA$DEGs_AR_day25 <-  row.names(data.frame(DEAList_day25_AR$AR$res) %>% 
+                            dplyr::filter(abs(DEAList_day25_AR$AR$res$log2FoldChange) > log2(logFCthr), 
+                                          DEAList_day25_AR$AR$res$padj < FDRthr))
+
+DEA$DEGs_HT_day50 <-  row.names(data.frame(DEAList_day50_HT$HT$res) %>% 
+                            dplyr::filter(abs(DEAList_day50_HT$HT$res$log2FoldChange) > log2(logFCthr), 
+                                          DEAList_day50_HT$HT$res$padj < FDRthr)) 
+
+DEA$DEGs_AR_day50 <-  row.names(data.frame(DEAList_day50_AR$AR$res) %>% 
+                            dplyr::filter(abs(DEAList_day50_AR$AR$res$log2FoldChange) > log2(logFCthr), 
+                                          DEAList_day50_AR$AR$res$padj < FDRthr))
+```
+
+### Extract genes in overlaps
+
+#### As lists of gene names
+
+```{r collapse=TRUE}
+overlaps_GeneNames <- list()
+
+overlaps_GeneNames$day25_HT_SFARI <- paste0(sort(intersect(DEA$DEGs_HT_day25, GeneVect$SFARI)))
+overlaps_GeneNames$day25_AR_SFARI <- paste0(sort(intersect(DEA$DEGs_AR_day25, GeneVect$SFARI)))
+overlaps_GeneNames$day50_HT_SFARI <- paste0(sort(intersect(DEA$DEGs_HT_day50, GeneVect$SFARI)))
+overlaps_GeneNames$day50_AR_SFARI <- paste0(sort(intersect(DEA$DEGs_AR_day50, GeneVect$SFARI)))
+
+overlaps_GeneNames
+```
+
+#### As dataframes from DEA
+
+```{r}
+dfList_OverlapGenes <- list()
+
+dfList_OverlapGenes$ht_day25 <- data.frame(DEAList_day25_HT$HT$res[rownames(DEAList_day25_HT$HT$res) %in% overlaps_GeneNames$day25_HT_SFARI, ])
+dfList_OverlapGenes$ar_day25 <- data.frame(DEAList_day25_AR$AR$res[rownames(DEAList_day25_AR$AR$res) %in% overlaps_GeneNames$day25_AR_SFARI, ])
+dfList_OverlapGenes$ht_day50 <- data.frame(DEAList_day50_HT$HT$res[rownames(DEAList_day50_HT$HT$res) %in% overlaps_GeneNames$day50_HT_SFARI, ])
+dfList_OverlapGenes$ar_day50 <- data.frame(DEAList_day50_AR$AR$res[rownames(DEAList_day50_AR$AR$res) %in% overlaps_GeneNames$day50_AR_SFARI, ])
+
+lapply(dfList_OverlapGenes, nrow)
+```
+
+### Upsetplot
+
+```{r fig.height=8, fig.width=8, collapse=TRUE}
+upset(fromList(overlaps_GeneNames), order.by = "freq")
+```
+
+
+### Extract directionality of genes
+
+```{r collapse=TRUE}
+counts <- data.frame(
+  Condition = character(),
+  Timepoint = character(),
+  Direction = character(),
+  Count = integer()
+)
+
+# Define conditions and timepoints names
+conditions <- c("Heterozygous_day25", "Ancestral_day25", "Heterozygous_day50", "Ancestral_day50")
+timepoints <- c("Day25", "Day25", "Day50", "Day50")
+
+# Process each dataframe
+for (i in seq_along(dfList_OverlapGenes)) {
+  df <- dfList_OverlapGenes[[i]]
+  
+  upregulated <- nrow(df %>% filter(log2FoldChange > 0, !is.na(padj) & padj < 0.05))
+  downregulated <- nrow(df %>% filter(log2FoldChange < 0, !is.na(padj) & padj < 0.05))
+  
+  counts <- rbind(counts, data.frame(
+    Condition = conditions[i],
+    Timepoint = timepoints[i],
+    Direction = "Upregulated",
+    Count = upregulated
+  ))
+  
+  counts <- rbind(counts, data.frame(
+    Condition = conditions[i],
+    Timepoint = timepoints[i],
+    Direction = "Downregulated",
+    Count = downregulated
+  ))
+}
+
+
+counts$Condition <- factor(counts$Condition, levels = c('Ancestral_day25', 'Ancestral_day50', 'Heterozygous_day25', 'Heterozygous_day50'))
+
+```
+
+### Barplot of number of genes
+
+```{r fig.height=5, fig.width=8, collapse=TRUE}
+ggplot(counts, aes(x = interaction(Condition, Timepoint), y = Count, fill = Direction)) +
+  geom_bar(stat = "identity", position = "dodge", col='black') +
+  geom_text(aes(label = abs(Count)), position = position_dodge(width = 0.9), size = 3.5, vjust=-.5) +
+  labs(title = "Number of DEGs in SFARI intersection",
+       x = "Condition and Timepoint",
+       y = "Number of Genes") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values=c("Upregulated" = "#FFB6C1", "Downregulated" = "#5DADE2")) +
+  ylim(c(0,125))
+```
+
+### Butterfly plot of number of genes 
+
+```{r fig.height=5, fig.width=6, collapse=TRUE}
+counts <- counts %>%
+  mutate(AdjustedCount = ifelse(Direction == "Downregulated", -Count, Count))
+
+# Create a bar plot using ggplot2
+ggplot(counts, aes(x = Condition, y = AdjustedCount, fill = Direction)) +
+  geom_bar(stat = "identity", width = 0.5, color='black') +
+   geom_text(aes(label = abs(Count)), vjust = ifelse(counts$Direction == "Upregulated", -0.3, 1.3), 
+            size = 3.5) +
+  labs(x = "Condition and Timepoint",
+       y = "Number of SFARI genes in overlap",
+       fill = '') +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text = element_text(color='black'),
+        axis.text.y = element_text(color='black'),
+        plot.title = element_blank()) + 
+  ylim(c(-100, 125)) +
+  scale_fill_manual(values = c("Upregulated" = "#FFB6C1", "Downregulated" = "#5DADE2"))
+
+ggsave(paste0(params$FiguresFolder, 'NumberOfSfariGenes_verticalBarplot.pdf'), width = 6, height = 5, bg = 'transparent')
+```
+
+
+```{r fig.height=3, fig.width=7, collapse=TRUE}
+ggplot(counts, aes(x = interaction(Condition, Timepoint), y = AdjustedCount, fill = Direction)) +
+  geom_bar(stat = "identity", width = 0.5, color='black') +
+   geom_text(aes(label = abs(Count)), hjust = ifelse(counts$Direction == "Upregulated", -0.3, 1.3), 
+            size = 3.5) +
+  labs(title = "Number of DEGs in SFARI intersection",
+       x = "Condition and Timepoint",
+       y = "Number of Genes") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  ylim(c(-100, 150)) +
+  scale_fill_manual(values = c("Upregulated" = "#FFB6C1", "Downregulated" = "#5DADE2")) +
+  coord_flip()
+  
+```
+
+
+### Results comparisons
+
+```{r collapse=TRUE}
+CompareResFlip <- computeCompResFC(dfList_OverlapGenes$ht_day25, dfList_OverlapGenes$ar_day50)
+```
+
+```{r collapse=TRUE}
+CompareResFlip$Significant
+```
+
+### Heatmap
+
+```{r fig.width=8, fig.height=6}
+# Extract the necessary columns for the heatmap
+heatmap_data <- CompareResFlip$Significant[, c("genes", "log2FoldChange_A", "log2FoldChange_B")]
+```
+
+```{r}
+GeneSets <- readRDS(paste0(params$GeneSets, 'GeneSets.rds'))
+```
+
+```{r}
+SFARIdf <- GeneSets$SFARI$All[GeneSets$SFARI$All$Symbol %in% heatmap_data$genes, ]
+SFARIdf$Score <- as.character(SFARIdf$Score)
+SFARIdf <- SFARIdf %>% rename('genes' = 'Symbol')
+SFARIdf <- SFARIdf[match(heatmap_data$genes, SFARIdf$genes),]
+```
+
+```{r}
+heatmap_data <- full_join(heatmap_data, SFARIdf, by = 'genes')
+```
+
+```{r fig.width=8, fig.height=6}
+# Convert to matrix and set rownames
+heatmap_matrix <- as.matrix(heatmap_data %>% dplyr::select(starts_with("log2FoldChange")))
+rownames(heatmap_matrix) <- heatmap_data$genes
+
+# Create column annotations
+column_annot <- HeatmapAnnotation(
+  Condition = c("Heterozygous Day25", "Ancestral Day50"),
+  col = list(Condition = c("Heterozygous Day25" = '#FFDAB9', "Ancestral Day50" = '#C8A2C8')),
+  gp = gpar(col = "black", lwd=1.5))
+
+
+sfari_annot <- HeatmapAnnotation(
+  which = 'row',
+  Score = heatmap_data$Score,
+  col = list(Score = c("1" = "#b8b8ff", "2" = "#dcc5a0", "3" = "#a6f2dd", "4" ="#fcf6bd", "5" = "#baf19c")),
+  gp = gpar(col = "black", lwd = 1.5))
+
+
+
+# Color function
+#col_fun <- colorRamp2(c(min(heatmap_matrix), 0, max(heatmap_matrix)), c("#5DADE2", "white", "#ff99a8"))
+col_fun <- colorRamp2(c(min(heatmap_matrix), 0, max(heatmap_matrix)), c("#2591d9", "white", "#ff425e"))
+
+
+pdf(paste0(params$FiguresFolder, 'HeatmapSFARIgenesOverlap.pdf'), width = 8, height = 5)
+
+Heatmap(heatmap_matrix, name = "log2FoldChange",
+        column_names_gp = gpar(fontsize = 10),
+        col = col_fun,
+        left_annotation = sfari_annot,
+        show_row_names = TRUE,
+        show_column_names = FALSE,
+        cluster_rows = TRUE,
+        cluster_columns = FALSE,
+        border = 'black',
+        rect_gp = gpar(col = "black", lwd = 1.5), 
+        width = unit(1, "cm"), row_names_rot = 0, 
+        row_names_gp = gpar(fontsize = 15, rot = 0),
+        top_annotation = column_annot,
+        heatmap_legend_param = list(title = "log2FoldChange", border='black'))
+dev.off()
+```
+
+
+```{r}
+heatmap_data$genes
+```
+

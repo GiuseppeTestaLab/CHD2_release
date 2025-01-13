@@ -1,0 +1,199 @@
+---
+title: "Annotation from Biomart"
+author: "Cristina Cheroni"
+contributing author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        theme: 'united'
+        highlight: 'tango'
+        code_folding: hide
+params: 
+    Specie: 'hsapiens'
+    Host: 'oct2022.archive.ensembl.org'
+    GeneCounts: '/group/testa/Project/CHD2/BulkRNAseq/data/Counts/CHD2_bulkRNAseqMergedCounts.txt'
+    EnsemblGeneVector: NULL
+    OutputFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/0a.GeneAnnotation/Output/'
+---
+
+
+### 1. Environment Set Up
+Values of RMarkdown parameters
+
+```{r EnvironmentSetupI, collapse=TRUE}
+for (i in 1:length(params))
+  print(paste('Parameter:', names(params)[i], ' - Value:', params[[i]], '- Class:', class(params[[i]])))
+```
+
+Parameters that could be specified while running this markdown: 
+
+ * __Specie__: name of the dataset that is processed. Default is hsapiens.
+ * __Host__: Ensembl address hosting  the desired database version for data retrieval. Default is current Ensembl version. N.B.: if default is not changed, results of the script will vary when a new version of dataset is implemented.  
+ * __GeneCounts__: table of gene counts produced by Salmon for aggregation of counts to the gene level. Here used to derive the vector of genes to be annotated. Can be set to NULL if a GeneVector is directly specified.
+ * __EnsemblGeneVector__: txt file containing the list of genes (as Ensembl code) for which the annotation should be retrieved. Default is null because GeneVector is generated from Transcript2Gene file. It can be specified if Transcript2Gene is set as NULL. Either Transcript2Gene or GeneVector should be set as NULL; anyway, if both are supplied, Transcript2Gene is preferentially used. 
+ * __OutputFolder__: directory where produced files will be written. Default is 'Output' folder in the current directory. 
+
+```{r EnvironmentSetupII, collapse=TRUE}
+library(biomaRt)
+library(tidyr)
+library(dplyr)
+```
+
+
+```{r FolderSetting}
+OutputFolder <- params$OutputFolder
+if (dir.exists(OutputFolder) == FALSE) {
+  dir.create(OutputFolder, recursive=FALSE)
+}
+```
+
+****
+
+### 2. DATA UPLOAD
+
+The vector of genes (as Ensembl gene code) can be supplied either as
+
+ * Count table, reporting the quantification at the gene level.The structure is supposed to be the one created by the bulk pipeline. Gene identity is reported in 'Gene' column as an Ensembl Gene Code with the Gencode version.
+ * Alternatively a vector of Ensembl Gene Codes can be directly supplied. In this case, it is important to set as NULL the GeneCounts parameter.
+
+```{r Data}
+GeneCounts <- params$GeneCounts
+CountMatrix <- read.table(GeneCounts, header=TRUE)
+#CountMatrix$Gene <- rownames(CountMatrix)
+CountMatrix <- CountMatrix %>% dplyr::select(Gene, everything())
+
+#rownames(CountMatrix) <- NULL
+
+if(is.null(GeneCounts)==FALSE){
+  GC <- CountMatrix %>% dplyr::filter(!duplicated(Gene)) %>% dplyr::mutate(EnsGene=Gene) %>%
+    tidyr::separate(EnsGene, into=c('EnsGene', 'Discard')) %>% dplyr::select(Gene, EnsGene)
+  GeneVector <- as.vector(GC$EnsGene) %>% unique()
+  #length(GeneVector)
+} else {
+    GeneVector <- read.delim(params$EnsemblGeneVector)
+  }
+  
+# The file is manipulated to obtain in the end a vector of unique EnsemblGeneCode. 
+# Duplicated Genecode IDs (ENSG with version) are filteted out and then split (with separate) to get rid
+# of the version. From rearranged GC, a GeneVector is obtained. 
+# N.B. It is possible (e.g. for human annotation) that more than one version for the same ENSG is present.
+# In this case, the multiple version will be eliminated in the final ENSG vector used for Biomart interrogation; the number of genes for which the annotation is retrieved will be different from the number of unique annotation retrieved from Biomart.  
+
+if(! identical(length(GeneVector), length(GC$Gene))){
+  stop('The generated gene vector has a different number of genes than the gene count table.')
+}
+```
+
+__Gene Vector contains `r length(GeneVector)` gene codes: `r paste(paste(GeneVector[1:3], collapse=' '), '...')`__   
+
+
+****
+
+### 3. ACCESS TO BIOMART 
+
+```{r Access, collapse=TRUE}
+Host <- params$Host
+Specie <- params$Specie
+BioMart <- biomaRt::listMarts(host=Host)[1,1]
+Version <- biomaRt::listMarts(host=Host)[1,2]
+Mart <- biomaRt::useMart(host=Host, biomart=BioMart, version=Version, 
+                dataset=paste0(Specie,'_gene_ensembl'))
+Mart
+```
+
+__From host `r Host`, `r Version` version of `r BioMart` biomart is interrogated.__  
+
+
+****
+
+### 4. ANNOTATION RETRIEVAL 
+
+```{r AttributeSetting, collapse=TRUE}
+if(Specie=='hsapiens'){
+  Attributes = c('ensembl_gene_id', 'hgnc_symbol', 'external_gene_name', 'gene_biotype',
+                 'description', 'chromosome_name', 'start_position', 'end_position')
+  
+  } else if(Specie=='mmusculus'){
+  Attributes = c('ensembl_gene_id', 'mgi_symbol', 'external_gene_name', 'gene_biotype', 
+                 'description', 'chromosome_name', 'start_position', 'end_position')
+  
+  } else if(Specie=='rnorvegicus'){
+  Attributes = c('ensembl_gene_id', 'rgd_symbo', 'external_gene_name', 'gene_biotype', 
+                 'description', 'chromosome_name', 'start_position', 'end_position')
+  
+  } else {
+  message('Sorry, specie currently not supported!')
+}
+```
+
+
+```{r Annotation, collapse=TRUE}
+Annotation <- biomaRt::getBM(mart=Mart, values=GeneVector, filters='ensembl_gene_id', attributes=Attributes, 
+                    uniqueRows=TRUE)
+Annotation <- Annotation %>% dplyr::filter(!duplicated(ensembl_gene_id))
+dim(Annotation)  
+if(length(unique(Annotation$ensembl_gene_id)) != length(Annotation$ensembl_gene_id)){
+  stop('ERROR: not-unique EnsemblID in annotation!')
+} 
+if(dim(Annotation)[1] != length(GeneVector)){
+  message('WARNING: inconsistency between length of gene vector and annotation!')
+} 
+# The warning could occur when more that one gene version referring to the same ENSG is present in the Genecode annotation (e.g. Human V27). The procedure is still correct and the same annotation from Biomart will be used for both the version in the join step. 
+```
+
+
+__The following attributes are retrieved for each Ensembl Gene Code: `r Attributes`.__  
+
+__After discarding duplicated records (if present), annotation is retrieve for `r length(Annotation$ensembl_gene_id)` unique Ensembl Gene Ids.__
+
+
+
+### 5. MERGE WITH GENE COUNTS
+
+The step is performed only if the Transcript2Gene is supplied. The final annotation data frame is then ordered on the basis of the Ensembl Gene ID, since this is the usual order from the read counts matrix. 
+
+```{r Merge, collapse=TRUE}
+if(is.null(GeneCounts)==FALSE){
+  AnnotationDF <- dplyr::left_join(GC, Annotation, by=c('EnsGene' = 'ensembl_gene_id')) #%>%
+    #dplyr::select(2, 1, 4, 5:10, 3)
+    }else{
+  AnnotationDF <- data.frame(Annotation)
+}  
+
+AnnotationDF <- AnnotationDF %>% dplyr::arrange(Gene)
+dim(AnnotationDF)
+if(length(unique(AnnotationDF$EnsGene)) != length(AnnotationDF$EnsGene)){
+  message('WARNING: non-unique EnsemblID in final annotation dataframe!')
+} 
+
+# This warning could occur when more that one gene version referring to the same ENSG is present in the Genecode annotation (see above).
+if(dim(AnnotationDF)[1] != length(GeneVector)){
+  stop('ERROR: inconsistency between length of gene vector and final annotation dataframe!')
+}
+```
+
+__The final information data frame reports information for `r length(AnnotationDF$EnsGene)` Ensembl Gene Ids.__
+
+****
+
+### 6. Savings
+
+Since there are symbols in the table (e.g. ', etc...) I leave the quoting in the file to avoid issues when the table is read. Using quote=FALSE, the number of rows from the table is uncorrect when imported by read.table command. 
+
+```{r SaveTable}
+write.table(AnnotationDF, paste0(OutputFolder, 'AnnotationEns101.txt'), quote=TRUE, row.names=FALSE, sep='\t')
+```
+
+
+```{r SaveRds}
+OutputAnnotation <- list()
+OutputAnnotation$AnnotationDF <- AnnotationDF
+OutputAnnotation$AnalysisParameters <- params
+OutputAnnotation$Date <- date()
+OutputAnnotation$Session <- sessionInfo()
+saveRDS(OutputAnnotation, paste0(OutputFolder, 'OutputAnnotation.rds')) 
+```
+
+ 

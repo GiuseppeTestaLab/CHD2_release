@@ -1,0 +1,365 @@
+---
+title: "CHD2 Cortical Brain Organoids Day25 - DEGs overlap with NDD genes"
+author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        theme: 'cosmo'
+        highlight: 'kate'
+        code_folding: hide
+params: 
+    Dataset: 'CHD2_iPSCs_and_organoids_PublicRepo'
+    DEAList_HT: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/iPSCs/Output/Savings/ipsc.DEAList_HT.rds'
+    DEAList_AR: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/iPSCs/Output/Savings/ipsc.DEAList_AR.rds'
+    GeneSets: '/group/testa/Project/CHD2/BulkRNAseq/data/GeneSets/NDDoverlaps/'
+    SavingFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/7.NDDOverlap/Output/Savings/'
+    FiguresFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/7.NDDOverlap/Output/Figures/'
+    FDRthr: 0.05
+    logFCthr: 1.5
+---
+
+### Overlap Analysis between NDD genes and DEGs in iPSCs
+
+**knowledge bases:**
+
+* **SFARI**
+* **DECIPHER**
+
+***
+
+```{r EnvironmentSetupII, collapse=TRUE}
+library(GeneOverlap)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+```
+
+## 1. Environment Set Up
+
+```{r EnvironmentSetupI, collapse=TRUE}
+for (i in 1:length(params))
+  print(paste('Parameter:', names(params)[i], ' - Value:', params[[i]], '- Class:', class(params[[i]])))
+```
+
+***
+
+## **DEGs are thresholded for Overlap Analysis:**
+
+### __FDR threshold: `r params$FDRthr`__
+### __LogFC threshold: `r params$logFCthr`__
+
+```{r collapse=TRUE}
+logFCthr <- params$logFCthr
+FDRthr <- params$FDRthr
+```
+
+***
+
+## 2. Data Upload
+
+
+### DEA
+
+```{r, collapse=TRUE}
+DEAList_HT <- readRDS(params$DEAList_HT)
+DEAList_AR <- readRDS(params$DEAList_AR)
+
+DEAList_HT
+DEAList_AR
+```
+
+
+```{r, collapse=TRUE}
+# check for genes with duplicated name
+table(duplicated(row.names(DEAList_HT)))
+if(sum(duplicated(row.names(DEAList_HT$HT$res))) > 0){
+  stop('Genes with duplicated symbol in DEA results')
+}
+
+table(duplicated(row.names(DEAList_HT)))
+if(sum(duplicated(row.names(DEAList_HT$HT$DEGs))) > 0){
+  stop('DEGs with duplicated symbol')
+}
+
+# check for genes with duplicated name
+table(duplicated(row.names(DEAList_AR)))
+if(sum(duplicated(row.names(DEAList_AR$HT$res))) > 0){
+  stop('Genes with duplicated symbol in DEA results')
+}
+
+table(duplicated(row.names(DEAList_AR)))
+if(sum(duplicated(row.names(DEAList_AR$HT$DEGs))) > 0){
+  stop('DEGs with duplicated symbol')
+}
+```
+
+
+****
+
+## 3. Data load: gene-phenotype knowledge bases
+
+```{r, collapse=TRUE}
+GeneSets <- readRDS(paste0(params$GeneSets, 'GeneSets.rds'))
+```
+
+****
+
+## 4. Definition of Gene Universe and Modules
+
+Gene Universe is defined as the genes that have been used for the generation of gene modules. 
+
+### 4.1 Gene Universe
+
+Define the universe of shared genes between the two networks that will be used for the overlap analysis.
+
+```{r Universe, collapse=TRUE}
+UniverseHT <- rownames(DEAList_HT$dds) # %>% unique() not necessary because checked above absence of duplicates
+UniverseAR <- rownames(DEAList_AR$dds) # %>% unique() not necessary because checked above absence of duplicates
+
+if (!identical(UniverseAR, UniverseHT)) {
+  print('Gene universes are not identical. Proceeding to compute union')
+  Universe <- union(UniverseAR, UniverseHT)
+}
+
+if (identical(UniverseAR, UniverseHT)) {
+  print('Gene universes are identical. Storing union as Universe')
+  Universe <- union(UniverseAR, UniverseHT)
+}
+
+length(Universe)
+```
+
+`r length(Universe)` genes have module assignment and will be used for the overlap analysis.
+
+
+### 4.2 DEGs list 
+
+Retrieve for each comparison the selected DEGs and organize in a list. 
+
+```{r collapse=TRUE}
+DEA <- list()
+
+#DEA$DEGs_HT = row.names(DEAList_HT$HT$DEGs)[row.names(DEAList_HT$HT$DEGs) %in% Universe]
+#table(duplicated(DEA$HT))
+
+#DEA$DEGs_AR <- row.names(DEAList_AR$AR$DEGs)[row.names(DEAList_AR$AR$DEGs) %in% Universe]
+#table(duplicated(DEA$AR))
+
+
+# More stringent filtering
+DEA$DEGs_HT <-  row.names(data.frame(DEAList_HT$HT$res) %>% dplyr::filter(abs(DEAList_HT$HT$res$log2FoldChange) > log2(logFCthr), DEAList_HT$HT$res$padj < FDRthr)) #manual filtering of results object to get DEGs
+
+DEA$DEGs_AR <-  row.names(data.frame(DEAList_AR$AR$res) %>% dplyr::filter(abs(DEAList_AR$AR$res$log2FoldChange) > log2(logFCthr), DEAList_AR$AR$res$padj < FDRthr)) #manual filtering of results object to get DEGs
+
+length(DEA$DEGs_HT)
+length(DEA$DEGs_AR)
+```
+
+
+
+## 5. Test for overlap enrichment
+
+### 5.1 GWAS Risk Genes
+
+For each disease, I select the genes that are found in the universe. Each gene is included only once.
+
+```{r, collapse=TRUE}
+GeneVect <- list()
+
+GeneVect$SFARI <- unique(GeneSets$SFARI$All$Symbol)[unique(GeneSets$SFARI$All$Symbol) %in% Universe]
+
+GeneVect$DD <- unique(GeneSets$DD$Simple$GeneName)[unique(GeneSets$DD$Simple$GeneName) %in% Universe]
+GeneVect$DD_B <- unique(GeneSets$DD$Brain$GeneName)[unique(GeneSets$DD$Brain$GeneName) %in% Universe]
+```
+
+
+### 5.2 Overlap Contingency Table
+
+```{r, collapse=TRUE}
+OvObj <- newGOM(DEA, GeneVect, genome.size=length(Universe))
+print(OvObj)
+```
+
+#### Intersection Numbers
+
+```{r, collapse=TRUE}
+getMatrix(OvObj, name='intersection')
+```
+
+#### Intersection PValues
+
+```{r, collapse=TRUE}
+getMatrix(OvObj, name='pval')
+```
+
+#### Intersection Odds Ratios
+
+```{r, collapse=TRUE}
+getMatrix(OvObj, name='odds.ratio')
+```
+
+## 6. Visualize overlap enrichment
+
+### 6.1 Overlap Heatmap
+
+```{r, fig.height=9, fig.width=9, collapse=TRUE}
+drawHeatmap(OvObj, cutoff=0.05, note.col='lightblue', grid.col = 'Blues')
+```
+
+### 6.2 DotPlot
+ 
+ * Data are re-organized for visualization
+ * Only OR > 1 are kept for visualization
+ * Numbers are visualized for all categories passing the OR filter
+ * Coloured dot is shown only for categories passing a pvalue threshold of 0.05
+
+```{r, collapse=TRUE}
+OR <- data.frame(getMatrix(OvObj, name='odds.ratio')) 
+OR$Module <- row.names(OR) 
+OR <- gather(OR, 'KBase', 'OR', -Module)
+
+PVAL <- data.frame(getMatrix(OvObj, name='pval')) 
+PVAL$Module <- row.names(PVAL) 
+PVAL <- gather(PVAL, 'KBase', 'PVal', -Module)
+
+NUM <- data.frame(getMatrix(OvObj, name='intersection')) 
+NUM$Module <- row.names(NUM) 
+NUM <- gather(NUM, 'KBase', 'Numbers', -Module)
+
+
+if(! identical(OR$Module, PVAL$Module)){
+  stop('Inconsistency')
+}
+if(! identical(OR$Module, NUM$Module)){
+  stop('Inconsistency')
+}
+if(! identical(OR$KBase, NUM$KBase)){
+  stop('Inconsistency')
+}
+if(! identical(OR$KBase, NUM$KBase)){
+  stop('Inconsistency')
+}
+
+
+Res <- mutate(OR, Pval=PVAL$PVal) %>% mutate(Numbers=NUM$Numbers)
+
+OR
+NUM
+```
+
+```{r, collapse=TRUE}
+ResSel <- dplyr::filter(Res, OR > 1)
+
+max(ResSel$OR)
+max(-log10(ResSel$Pval))
+```
+
+```{r}
+ResSel %>% dplyr::filter(Pval < 0.05)
+```
+
+```{r, fig.height=9, fig.width=9, collapse=TRUE, collapse=TRUE, warning=FALSE}
+cols <- viridis::cividis(100)[20:100]
+
+Dot <- ggplot(ResSel, aes(Module, KBase, label=Numbers)) + 
+  geom_point(aes(size=-log10(Pval), col=OR)) + 
+  geom_text() + 
+  scale_size_continuous(range=c(5, 20), limits=c(-log10(0.05), 10)) +
+  scale_color_viridis_c(limits=c(1, 2), begin=0.4) + xlab('') + ylab('') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  theme(axis.text = element_text(size=10, color='black'))
+
+Dot
+
+ggsave(Dot, filename=paste0(params$FiguresFolder, 'KB_NDD_ipsc.pdf'), width=6.5, height=6.5)
+```
+
+***
+
+## 7. Overlapping gene identity
+
+Check gene identity for each significant overlap. 
+
+### Heterozygous
+
+* For __SFARI `r length(intersect(DEA$DEGs_HT, GeneVect$SFARI))` overlapping genes__:   `r paste0(sort(intersect(DEA$DEGs_HT, GeneVect$SFARI)))`
+
+* For __ADHD `r length(intersect(DEA$DEGs_HT, GeneVect$DD_B))` overlapping genes__:   `r paste0(sort(intersect(DEA$DEGs_HT, GeneVect$DD_B)))`
+
+#### SFARI
+
+```{r collapse=TRUE}
+overlapSFARI_1 <- paste0(sort(intersect(DEA$DEGs_HT, GeneVect$SFARI)))
+print('Genes present in the overlap for SFARI:')
+DT::datatable(as.data.frame(overlapSFARI_1), class = "hover", colnames = "",
+              escape = FALSE, caption = "Heterozygous (SFARI)",
+              options = list(autoWidth = TRUE, dom = "Bfrtip"))
+```
+
+#### ADHD
+
+```{r collapse=TRUE}
+overlapADHD_1 <- paste0(sort(intersect(DEA$DEGs_HT, GeneVect$DD_B)))
+print('Gene present in the overlap for ADHD:')
+DT::datatable(as.data.frame(overlapADHD_1), class = "hover", colnames = "",
+              escape = FALSE, caption = "Heterozygous (ADHD)",
+              options = list(autoWidth = TRUE, dom = "Bfrtip"))
+```
+
+
+### Ancestral
+
+* For __SFARI `r length(intersect(DEA$DEGs_AR, GeneVect$SFARI))` overlapping genes__:   `r paste0(sort(intersect(DEA$DEGs_AR, GeneVect$SFARI)))`
+
+* For __ADHD `r length(intersect(DEA$DEGs_AR, GeneVect$DD_B))` overlapping genes__:   `r paste0(sort(intersect(DEA$DEGs_AR, GeneVect$DD_B)))`
+
+#### SFARI
+
+```{r collapse=TRUE}
+overlapSFARI_2 <- paste0(sort(intersect(DEA$DEGs_AR, GeneVect$SFARI)))
+print('Genes present in the overlap for SFARI:')
+DT::datatable(as.data.frame(overlapSFARI_2), class = "hover", colnames = "",
+              escape = FALSE, caption = "Ancestral (SFARI)",
+              options = list(autoWidth = TRUE, dom = "Bfrtip"))
+```
+
+#### ADHD
+
+```{r collapse=TRUE}
+overlapADHD_2 <- paste0(sort(intersect(DEA$DEGs_AR, GeneVect$DD_B)))
+print('Gene present in the overlap for ADHD:')
+DT::datatable(as.data.frame(overlapADHD_2), class = "hover", colnames = "",
+              escape = FALSE, caption = "Ancestral (ADHD)",
+              options = list(autoWidth = TRUE, dom = "Bfrtip"))
+```
+
+***
+
+
+## 8. Savings
+
+```{r}
+saveRDS(Res, paste0(params$SavingFolder, 'ipsc_NDDOverlapResults.rds'))
+```
+
+```{r SaveSession}
+SessionInfo <- sessionInfo()
+Date <- date()
+save.image(paste0(params$SavingFolder, 'KB_NDD_ipsc.RData'))
+```
+
+```{r SessionInfo}
+Date
+
+SessionInfo
+``` 
+
+***
+
+### **`r paste0('last update on: ', date())`**
+
+***
+

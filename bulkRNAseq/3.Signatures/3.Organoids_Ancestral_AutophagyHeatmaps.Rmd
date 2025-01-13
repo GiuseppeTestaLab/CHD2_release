@@ -1,0 +1,322 @@
+---
+title: "AutophagyComplexHeatmap All"
+author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: html_document
+
+params: 
+    AutophagyTable: '/group/testa/Project/CHD2/BulkRNAseq/data/GeneSets/Autophagy.txt'
+    ar.day25.deseq: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/day25/Output/Savings/day25CbO.deseqARvsWT.rds'
+    ar.day50.deseq: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/day50/Output/Savings/day50CbO.deseqARvsWT.rds'
+    FiguresFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/3.Signatures/Output/Figures/'
+    padj_threshold: 0.05
+    logFC_threshold: no
+    logFC_ceiling: 2
+---
+
+```{r EnvironmentSetupI, include=FALSE}
+for (i in 1:length(params))
+  print(paste('Parameter:', names(params)[i], ' - Value:', params[[i]], '- Class:', class(params[[i]])))
+```
+
+```{r include=FALSE}
+#Define FDR threshold
+padj_threshold <- params$padj_threshold
+
+#Define logFC threshold
+logFC_thrshold <- params$logFC_threshold
+
+#Define ceiling value accoriding to params
+ceiling_value <- params$logFC_ceiling
+```
+
+***
+
+## Thresholds
+
+**FDR threshold is set to:** `r padj_threshold`
+
+**LogFC threshold is set to:** NULL
+
+**LogFC ceiling is set to:** `r ceiling_value`
+
+***
+
+### Libraries
+
+```{r include=FALSE}
+library(ComplexHeatmap)
+library(dplyr)
+library(SEtools)
+library(circlize)
+library(ggplot2)
+```
+
+
+### Import DEGs from DESeq2
+
+```{r, collapse=TRUE}
+degs_ar_day25 <- data.frame(readRDS(params$ar.day25.deseq))[, c(2,6)]
+degs_ar_day50 <- data.frame(readRDS(params$ar.day50.deseq))[, c(2,6)]
+
+degs_ar_day25 <- tibble::rownames_to_column(degs_ar_day25, var = 'GeneSymbol')
+degs_ar_day50 <- tibble::rownames_to_column(degs_ar_day50, var = 'GeneSymbol')
+
+degs_ar_day25 <- degs_ar_day25 %>% filter(padj < padj_threshold)
+degs_ar_day50 <- degs_ar_day50 %>% filter(padj < padj_threshold)
+
+degs_ar_day25$dataset <- 'Day25_Ancestral_Organoids'
+degs_ar_day50$dataset <- 'Day50_Ancestral_Organoids'
+```
+
+```{r}
+degs <- purrr::reduce(list(degs_ar_day25, degs_ar_day50), full_join, by = "GeneSymbol")
+
+degs <- degs %>%
+  rename(log2FoldChange_day25CbO_Ar = log2FoldChange.x, padj.day25CbO_Ar = padj.x,
+         log2FoldChange_day50CbO_Ar = log2FoldChange.y, padj.day50CbO_Ar = padj.y)
+```
+
+### Autophagy signature genes
+
+```{r, collapse=TRUE}
+#Import Autophagy table
+AutophagyDF <- read.table(params$AutophagyTable, sep = '\t', header=TRUE)
+```
+
+### Annotation dataframe
+
+```{r, collapse=TRUE}
+#Make annotation df from autophagy dataframe
+annotation_df <- data.frame(GeneSymbol=AutophagyDF$GeneSymbol,
+                            Category=AutophagyDF$Category)
+
+#Remove duplicates
+#annotation_df <- annotation_df[!duplicated(annotation_df$GeneSymbol), ]
+```
+
+### Merge DEGs and Autophagy signature df
+
+```{r, collapse=TRUE}
+#Make degs dataframe with intersection of DEGs and AutophagyGenes
+degs <- left_join(degs, annotation_df, by="GeneSymbol")
+
+#Remove NAs
+degs <- degs[!is.na(degs$Category), ]
+```
+
+### Generate matrix
+
+```{r, collapse=TRUE}
+#Generate matrix for heatmap with row and column names
+mat <- as.matrix(degs %>% dplyr::select(starts_with("log2FoldChange")))
+rownames(mat) <- degs$GeneSymbol
+
+head(mat)
+```
+
+```{r}
+columNamesVector <- c('Day25CbO_AR','Day50CbO_AR')
+```
+
+
+### Split categories 
+
+```{r, collapse=TRUE}
+#Lysosome
+lysogenes <- degs[degs$Category == 'Lysosome', ]
+lysomat <- as.matrix(lysogenes %>% dplyr::select(starts_with("log2FoldChange")))
+rownames(lysomat) <- lysogenes$GeneSymbol
+colnames(lysomat) <- columNamesVector
+lysomat[is.na(lysomat)] <- 0
+
+
+#Core autophagy genes
+coregenes <- degs[degs$Category == 'Autophagy core', ]
+coremat <- as.matrix(coregenes%>% dplyr::select(starts_with("log2FoldChange")))
+rownames(coremat) <- coregenes$GeneSymbol
+colnames(coremat) <- columNamesVector
+coremat[is.na(coremat)] <- 0
+
+
+#mTOR and upstream pathways
+mtorgenes <- degs[degs$Category == 'mTOR and upstream pathways', ]
+mtormat <- as.matrix(mtorgenes %>% dplyr::select(starts_with("log2FoldChange")))
+rownames(mtormat) <- mtorgenes$GeneSymbol
+colnames(mtormat) <- columNamesVector
+mtormat[is.na(mtormat)] <- 0
+
+
+#Autophagy regulators
+regolatorgenes <- degs[degs$Category == 'Autophagy regulators', ]
+regolatormat <- as.matrix(regolatorgenes %>% dplyr::select(starts_with("log2FoldChange")))
+rownames(regolatormat) <- regolatorgenes$GeneSymbol
+colnames(regolatormat) <- columNamesVector
+regolatormat[is.na(regolatormat)] <- 0
+
+
+#Mitophagy
+mitophagygenes <- degs[degs$Category == 'Mitophagy', ]
+mitophagymat <- as.matrix(mitophagygenes %>% dplyr::select(starts_with("log2FoldChange")))
+rownames(mitophagymat) <- mitophagygenes$GeneSymbol
+colnames(mitophagymat) <- columNamesVector
+mitophagymat[is.na(mitophagymat)] <- 0
+
+
+#Docking and fusion
+dockingenes <- degs[degs$Category == 'Mitophagy', ]
+dockingmat <- as.matrix(dockingenes %>% dplyr::select(starts_with("log2FoldChange")))
+rownames(dockingmat) <- dockingenes$GeneSymbol
+colnames(dockingmat) <- columNamesVector
+dockingmat[is.na(dockingmat)] <- 0
+
+
+#Lysosome-related
+lysorelatedgenes <- degs[degs$Category == 'Mitophagy', ]
+lysorelatedmat <- as.matrix(lysorelatedgenes %>% dplyr::select(starts_with("log2FoldChange")))
+rownames(lysorelatedmat) <- lysorelatedgenes$GeneSymbol
+colnames(lysorelatedmat) <- columNamesVector
+lysorelatedmat[is.na(lysorelatedmat)] <- 0
+```
+
+```{r, collapse=TRUE}
+#Category apping color
+annotation_colors <- c("mTOR and upstream pathways" = "red",
+                     "Autophagy core" = "blue",
+                     "Autophagy regulators" = "green",
+                     "Mitophagy" = "orange",
+                     "Docking and fusion" = "purple",
+                     "Lysosome" = "yellow",
+                     "Lysosome-related" = "pink")
+
+annotation_colors <- c("mTOR and upstream pathways" = "#A2F07B",
+                     "Autophagy core" = "#EB489C",
+                     "Autophagy regulators" = "#8D6AFF",
+                     "Mitophagy" = "#EB5E21",
+                     "Docking and fusion" = "#F0DA2A",
+                     "Lysosome" = "#2C7FB8",
+                     "Lysosome-related" = "#70E6CC")
+```
+
+### Color function
+```{r, collapse=TRUE}
+#Color function
+col_fun = colorRamp2(c(-2, 0, 2), c("#3b528b", "white", "#f1605d"))
+col_fun(seq(-3, 3))
+```
+
+### Set rowannotation color
+
+```{r, collapse=TRUE}
+#RowAnnotation
+rowcolor <- annotation_colors[names(annotation_colors) %in% degs$Category]
+category_anno <- rowAnnotation(Category = degs$Category, 
+                               col = list(Category = rowcolor))
+```
+
+
+### Set LogFC ceiling to matrix
+
+```{r fig.height=10, fig.width=5}
+#Set upper and lower threshold values
+threshold_upper <- ceiling_value
+threshold_lower <- -ceiling_value
+
+#Replace values exceeding the thresholds
+mat[mat > threshold_upper] <- threshold_upper
+mat[mat < threshold_lower] <- threshold_lower
+```
+
+
+### Heatmap with all categories
+
+```{r fig.height=40, fig.width=5}
+allmat <- as.matrix(degs %>% dplyr::select(starts_with("log2FoldChange")))
+rownames(allmat) <- degs$GeneSymbol
+colnames(allmat) <- columNamesVector
+allmat[is.na(allmat)] <- 0
+
+Heatmap(allmat, col = col_fun, name = 'log2FoldChange', right_annotation = category_anno,
+        border = 'black', rect_gp = gpar(col = "black", lwd = 1), 
+        width = unit(1, "cm"))
+```
+
+### Heatmap for lysosomes
+
+```{r fig.height=9, fig.width=10}
+Heatmap(lysomat, col = col_fun, name = 'log2FoldChange',
+        border = 'black', rect_gp = gpar(col = "black", lwd = 1), 
+        width = unit(1, "cm"))
+```
+
+### Heatmap for core autophagy genes
+
+```{r fig.height=13, fig.width=10}
+Heatmap(coremat, col = col_fun, name = 'log2FoldChange',
+        border = 'black', rect_gp = gpar(col = "black", lwd = 1), 
+        width = unit(1, "cm"))
+```
+
+### Heatmap for autophagy regulators
+
+```{r fig.height=9, fig.width=10}
+Heatmap(regolatormat, col = col_fun, name = 'log2FoldChange',
+        border = 'black', rect_gp = gpar(col = "black", lwd = 1), 
+        width = unit(1, "cm"))
+```
+
+### Heatmap with mTOR and usptream pathways
+```{r fig.height=9, fig.width=10}
+Heatmap(mtormat, col = col_fun, name = 'log2FoldChange',
+        border = 'black', rect_gp = gpar(col = "black", lwd = 1), 
+        width = unit(1, "cm"))
+```
+
+### Fraction of genes in categories
+
+```{r, collapse=TRUE}
+#Compute fraction of genes in each category
+fraction <- data.frame(table(degs$Category) / length(degs$Category))
+
+ggplot(fraction, aes(x=Freq, y=Var1)) +
+  geom_col() + theme_bw()
+```
+
+### Heatmap for lysosomes and autophagy core genes
+```{r fig.height=15, fig.width=9}
+print('genes in common:')
+intersect(rownames(lysomat), rownames(coremat))
+
+#drop TMEM59 from lysomat; then the annotation will be fixed in illustrator making a single square with both color
+
+toexclude <- ''
+lysomat <- lysomat[!rownames(lysomat) %in% toexclude, , drop = FALSE]
+
+lysocoremat <- rbind(lysomat, coremat)
+
+x <- c('Lysosomes', 'Autophagy core genes')
+
+rows <-  rep(x, times=c(nrow(lysomat), nrow(coremat)))
+row_annotation <- HeatmapAnnotation(gp = gpar(col = "black"),
+                                    Category = rows, which = "row", width = unit(1, "cm"),
+                                    col=list(Category = c('Lysosomes' = '#22a884', 
+                                                          'Autophagy core genes' = '#453781')))
+
+lysocoreheatmap <- Heatmap(lysocoremat, col = col_fun, name = 'log2FoldChange', left_annotation = row_annotation,
+        border = 'black', rect_gp = gpar(col = "black", lwd = 1), 
+        width = unit(0.75, "cm"), row_names_rot = 0, 
+        row_names_gp = gpar(fontsize = 15, rot = 0))
+
+lysocoreheatmap
+
+pdf(paste0(params$FiguresFolder, 'LysoAndAutophagyCoreGenes_heatmap.pdf'), width = 7, height = 15)
+lysocoreheatmap
+dev.off()
+```
+
+
+***
+
+### **`r paste0('last update on: ', date())`**
+
+***

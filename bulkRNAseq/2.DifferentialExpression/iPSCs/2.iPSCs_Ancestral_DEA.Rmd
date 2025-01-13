@@ -1,0 +1,407 @@
+---
+title: "Differential Expression Analysis of CHD2 iPSCs"
+author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        theme: 'cosmo'
+        highlight: 'kate'
+        code_folding: hide
+params: 
+    Dataset: 'CHD2_iPSCs_and_organoids_PublicRepo'
+    SE_Bio: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/1.Exploratory/Output/Savings/CHD2_iPSCs_and_organoids_PublicRepoSE_Bio.rds'
+    SavingFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/iPSCs/Output/Savings'
+    OutputFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/iPSCs/Output/Figures'
+    padj_threshold: 0.05
+    log2fc_threshold: 1.5
+---
+
+***
+
+```{r Params, include=FALSE}
+for (i in 1:length(params))
+  print(paste('Parameter:', names(params)[i], ' - Value:', params[[i]], '- Class:', class(params[[i]])))
+```
+
+```{r Libraries, include=FALSE}
+library(DESeq2)
+library(SummarizedExperiment)
+library(ggplot2)
+library(sechm)
+library(ashr)
+library(affy)
+library(edgeR)
+library(UpSetR)
+library(DEFormats)
+library(dplyr)
+library(apeglm)
+library(RColorBrewer)
+library(pheatmap)
+library(tidyr)
+library(RNASeqBulkExploratory)
+source("/group/testa/Project/CHD2/BulkRNAseq/data/HelperFunctions/HelperFunctions.R")
+```
+
+```{r Setup, include=FALSE}
+Dataset <- params$Dataset
+OutputFolder <- params$OutputFolder
+SavingFolder <- params$SavingFolder
+
+if (dir.exists(OutputFolder) == FALSE) {
+  dir.create(OutputFolder, recursive=TRUE)
+}
+
+if (dir.exists(SavingFolder) == FALSE) {
+  dir.create(SavingFolder, recursive=TRUE)
+}
+```
+
+
+***
+
+
+# 1. Data preparation
+
+### Read data
+
+*SE object created from exploratory analysis.*
+
+*Gene selection according to Biotype already performed*
+
+```{r, collapse=TRUE}
+SE_Bio <- readRDS(params$SE_Bio)
+```
+
+### Convert ENSG annotation to Gene Symbol before Differential Expression Analysis and duplicate gene names removal
+
+*Duplicated gene names are dropped and gene IDs are set as rownames.*
+
+**The number of duplicated GeneName is: `r length(SE_Bio[duplicated(rowData(SE_Bio)$GeneName), ])`**
+
+**The number of duplicated Ensembl Genes with version is: `r length(SE_Bio[duplicated(rownames(SE_Bio), )])`**
+
+
+```{r collapse=TRUE}
+SE_Bio <- SE_Bio[!duplicated(rowData(SE_Bio)$GeneName), ]
+rownames(SE_Bio) <- rowData(SE_Bio)$GeneName
+SE_Bio
+```
+
+```{r, collapse=TRUE}
+ScaledCols <- c('darkblue', "purple","white","lightgoldenrod1", 'goldenrod1')
+
+padj_threshold = params$padj_threshold
+log2fc_threshold = params$log2fc_threshold
+```
+
+### **Filtering Thresholds are set to:**
+
+* **Log2FC  = `r log2fc_threshold`**
+* **FDR  = `r padj_threshold`**
+
+***
+
+### **Sample selection**
+
+**Only iPSCs are kept**
+
+```{r, collapse=TRUE}
+SE_Bio_iPSC <- SE_Bio[, colData(SE_Bio)$Timepoint %in% 'd0']
+SE_Bio_iPSC <- SE_Bio_iPSC[, !colData(SE_Bio_iPSC)$Genotype %in% 'HT']
+colData(SE_Bio_iPSC)
+```
+
+***
+
+# DESeq2
+
+## 2. Generation of the dds object
+
+ * **DDS object** is generated from the *Count Matrix* and *Sample Metadata* stored in the **SE_Bio object**
+ * **Genotype** is specified for the design: **Ancestral**, **Wildtype**.
+
+```{r, collapse=TRUE}
+CountMatrix <- assays(SE_Bio_iPSC)$counts
+SampleMeta <- DataFrame(colData(SE_Bio_iPSC))
+
+all(rownames(SampleMeta) == colnames(CountMatrix))
+```
+
+```{r, collapse=TRUE}
+dds <- DESeqDataSetFromMatrix(countData=assays(SE_Bio_iPSC)$counts, DataFrame(colData(SE_Bio_iPSC)), design = ~Batch+Genotype)
+mcols(dds) <- DataFrame(mcols(dds), DataFrame(rowData(SE_Bio_iPSC)))
+
+dds$Genotype <- factor(dds$Genotype, levels = c("WT", "AR"))
+dds$Genotype <- relevel(dds$Genotype, ref = "WT")
+
+
+dds$Genotype
+
+dds
+```
+
+### Inspection of genes with zero counts
+
+```{r, fig.width=5, fig.height=5, dpi=300, out.height='50%', out.width='50%', collapse=TRUE}
+ZeroPlot <- CountMatrix %>% 
+  mutate(row = row_number()) %>%
+  pivot_longer(cols = -row, names_to = "col", values_to = "value") %>% 
+  filter(value == 0) %>%
+  group_by(col) %>%
+  summarise(zerocount = n())  %>%
+  ggplot(., aes(y=col, x=zerocount)) +
+  geom_col(col='black', fill='#76c8c8') +
+  coord_flip() + 
+  geom_label(aes(label=zerocount)) + 
+  labs(title=paste0('Number of genes with zero counts ', '(out of ', nrow(CountMatrix), ' genes)'),
+       y='', x='') +
+  theme_bw() +
+  theme(axis.text = element_text(colour = 'black', size=7),
+        axis.text.x = element_text(angle=45, hjust = 0.5, vjust=0.5),
+        plot.title = element_text(hjust = 0.5, size = 7))
+
+ZeroPlot
+```
+
+
+### Filtering of the dds object
+
+ * I focus on **protein-coding** and **lncRNA** genes only (other biotypes were already removed from the SE_Bio object)
+ * I implement a filter on the expression of **at least 5 reads in at least 2 samples**
+
+```{r, collapse=TRUE}
+keep <- rowSums(counts(dds)>=5) >= 2 #changed from 5 ##changed from 10 and 2 samples from 3
+
+table(keep)
+dds <- dds[keep,]
+
+dds
+```
+
+**A dds object containing information about `r dim(dds)[1]` genes in `r dim(dds)[2]` samples is tested for differential expression.**
+
+****
+
+## 3. Differential Expression
+
+```{r, collapse=TRUE}
+dds <- DESeq(dds)
+sizeFactors(dds)
+```
+
+### Inspection of the dds object {.tabset}
+
+#### Top50 genes heatmap
+
+```{r, fig.width=6, fig.height=6, dpi=300, collapse=TRUE}
+select <- order(rowMeans(counts(dds,normalized=TRUE)),
+                decreasing=TRUE)[1:50]
+ntd <- normTransform(dds)
+df <- as.data.frame(colData(dds)[,c("Genotype")])
+colnames(df) <- 'Genotype'
+#df$Run <- c(rep('rep1', 3), rep('rep2', 3))
+
+rownames(df) <- colnames(ntd)
+
+pheatmap(assay(ntd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=TRUE, annotation_col=df, border_color = 'black')
+```
+
+#### Samples distances
+
+```{r fig.width=6, fig.height=6, dpi=300, collapse=TRUE}
+vsd <- vst(dds, blind=FALSE)
+sampleDists <- dist(t(assay(vsd)))
+
+sampleDistMatrix <- as.matrix(sampleDists)
+#rownames(sampleDistMatrix) <- paste(vsd$condition, vsd$type, sep="-")
+#colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(RColorBrewer::brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors, main = 'Samples Distances', name = 'vst')
+```
+
+#### Counts Distribution
+
+```{r, fig.width=6, fig.height=6, fig.align='center', dpi=300, collapse=TRUE, message=FALSE, warning=FALSE}
+SF <- data.frame(Sample=names(sizeFactors(dds)), SizeF=sizeFactors(dds))
+
+par(mfrow=c(2,2),cex.lab=0.7)
+boxplot(log2(counts(dds)),  col=ScaledCols, cex.axis=0.7, 
+        las=1, xlab="log2(counts)", horizontal=TRUE, main="Raw counts")
+boxplot(log2(counts(dds, normalized=TRUE)),  col=ScaledCols, cex.axis=0.7, 
+        las=1, xlab="log2(normalized counts)", horizontal=TRUE, main="Normalized counts") 
+plotDensity(log2(counts(dds)),  col=ScaledCols, 
+            xlab="log2(counts)", cex.lab=0.7, panel.first=grid()) 
+plotDensity(log2(counts(dds, normalized=TRUE)), col=ScaledCols, 
+            xlab="log2(normalized counts)", cex.lab=0.7, panel.first=grid()) 
+```
+
+### Dispersion estimate
+
+```{r, fig.width=6, fig.height=6, fig.align='center', dpi=300, collapse=TRUE}
+plotDispEsts(dds)
+```
+
+***
+
+### Extract Result of contrast: AR vs WT
+
+```{r, fig.width=4, fig.height=4, fig.align='center', dpi=300, collapse=TRUE}
+res_dds_ar <- results(dds, contrast=c("Genotype","AR","WT"), alpha=0.05, cooksCutoff=0.99)
+summary(res_dds_ar)
+
+metadata(res_dds_ar)$filterThreshold
+metadata(res_dds_ar)$alpha
+
+plot(metadata(res_dds_ar)$filterNumRej, 
+     type="b", ylab="number of rejections",
+     xlab="quantiles of filter", main='Ancestral',
+     cex.lab=0.5, cex.axis=0.5, cex.main=0.5)
+lines(metadata(res_dds_ar)$lo.fit, col="red")
+abline(v=metadata(res_dds_ar)$filterTheta)
+```
+
+
+### Top results from res table sorted by adjusted Pvalue for AR vs WT
+
+```{r, collapse=TRUE}
+head(res_dds_ar[order(res_dds_ar$padj),])
+```
+**`r print('Ancestral')`**
+
+ * Genes modulated considering a *FDR threshold of 0.1*: **`r dim(dplyr::filter(data.frame(res_dds_ar), padj < 0.1))[1]`**
+ 
+ * Genes modulated considering a *FDR threshold of 0.05*: **`r dim(dplyr::filter(data.frame(res_dds_ar), padj < 0.05))[1]`**
+ 
+ * Genes modulated considering a *FDR threshold of 0.05 and FC threshold of 1.5:* **`r dim(dplyr::filter(data.frame(res_dds_ar), padj < 0.05, abs(log2FoldChange)>log2(1.5)))[1]`**
+ 
+ * Genes modulated considering a *FDR threshold of 0.05 and FC threshold of 2:* **`r dim(dplyr::filter(data.frame(res_dds_ar), padj < 0.05, abs(log2FoldChange)>log2(2)))[1]`**
+
+***
+
+### Fold-change shrinkage
+
+Since I am using the constrast option to retrieve the results, I cannot rely on apleglm default algorithm for logFC shrinkage. Since at the moment I am not using the lfcThreshold option, I decide for the ashr algorithm. 
+
+```{r, collapse=TRUE}
+resAshr_ar <- lfcShrink(dds, contrast=c("Genotype","AR","WT"), res=res_dds_ar, type="ashr")
+summary(resAshr_ar)
+```
+
+#### Ancestral
+
+```{r, fig.width=8, fig.height=6, dpi=300, warning=FALSE, collapse=TRUE}
+#par(mfrow=c(1,2), mar=c(4,4,2,1))
+xlim <- c(1,1e5); ylim <- c(-6,6)
+DESeq2::plotMA(res_dds_ar, xlim=xlim, ylim=ylim, main="no LFC shrink")
+DESeq2::plotMA(resAshr_ar, xlim=xlim, ylim=ylim, main="LFC shrink with ashr algorithm")
+```
+
+***
+
+### Top results from res table sorted by adjpvalue after LFC shrinkage
+
+```{r, collapse=TRUE}
+head(resAshr_ar[order(resAshr_ar$padj),])
+```
+
+**`r print('Ancestral')`**
+
+ * Genes modulated considering a *FDR threshold of 0.1*: **`r dim(dplyr::filter(data.frame(resAshr_ar), padj < 0.1))[1]`**
+ 
+ * Genes modulated considering a *FDR threshold of 0.05*: **`r dim(dplyr::filter(data.frame(resAshr_ar), padj < 0.05))[1]`**
+ 
+ * Genes modulated considering a *FDR threshold of 0.05 and FC threshold of 1.5:* **`r dim(dplyr::filter(data.frame(resAshr_ar), padj < 0.05, abs(log2FoldChange)>log2(1.5)))[1]`**
+ 
+ * Genes modulated considering a *FDR threshold of 0.05 and FC threshold of 2:* **`r dim(dplyr::filter(data.frame(resAshr_ar), padj < 0.05, abs(log2FoldChange)>log2(2)))[1]`**
+
+***
+
+*Log Fold change shrinkage doesn't change the results significantly, thus I decided to keep the standard DESeq2 workflow for testing differential gene expression.*
+
+***
+
+### Extract DEGs
+
+ * Here I extract the DEGs passing adjusted Pvalue and logFC thresholds, for AR vs WT contrast (deseqDEGsAR)
+ 
+```{r, collapse=TRUE}
+deseqDEGsAR <- dplyr::filter(data.frame(res_dds_ar), padj < padj_threshold, abs(log2FoldChange) > log2(log2fc_threshold))
+
+deseqDEGsARashr <- dplyr::filter(data.frame(resAshr_ar), padj < padj_threshold, abs(log2FoldChange) > log2(log2fc_threshold))
+```
+
+***
+
+# Results Visualization
+
+```{r, collapse=TRUE}
+SE_deseq2 <- as(dds, "RangedSummarizedExperiment")
+assays(SE_deseq2)$vst <- assay(vst(dds, blind=TRUE))
+```
+
+```{r collapse=TRUE}
+FdrCeil = 1e-10
+logFcCeil = 7.5
+```
+
+### **Plotting Ceilings are set to:**
+
+* **Log2FC  `r logFcCeil`**
+* **FDR  `r FdrCeil`**
+
+### Volcano {.tabset}
+
+#### Ancestral
+
+```{r deseq_volcano_ar, fig.width=9, fig.height=9, message=FALSE, warning=FALSE}
+#rename(as.data.frame(res_dds_ar), logFC = log2FoldChange, FDR = padj) %>% VolcanoTiltedNodash(. , AdjustedCutoff = 0.05, LabellingCutoff = 0.01, FCCutoff = 2, main = 'AR vs WT')
+
+dplyr::rename(as.data.frame(res_dds_ar), logFC = log2FoldChange, FDR = padj) %>% VolcanoTiltedNodash(. , AdjustedCutoff = padj_threshold, LabellingCutoff = 0.01, FCCutoff = log2fc_threshold, main = 'AR vs WT (iPSCs)') + labs(y='Log FoldChange') + xlim(0, -log10(FdrCeil)) + ylim(-logFcCeil, logFcCeil)
+```
+
+#### Ancestral LFC shrink
+
+```{r deseq_volcano_ar ashr, fig.width=9, fig.height=9, message=FALSE, warning=FALSE}
+#rename(as.data.frame(res_dds_ar), logFC = log2FoldChange, FDR = padj) %>% VolcanoTiltedNodash(. , AdjustedCutoff = 0.05, LabellingCutoff = 0.01, FCCutoff = 2, main = 'AR vs WT')
+
+dplyr::rename(as.data.frame(resAshr_ar), logFC = log2FoldChange, FDR = padj) %>% VolcanoTiltedNodash(. , AdjustedCutoff = padj_threshold, LabellingCutoff = 0.01, FCCutoff = log2fc_threshold, main = 'AR vs WT (iPSCs)') + labs(y='Log FoldChange') + xlim(0, -log10(FdrCeil)) + ylim(-logFcCeil, logFcCeil)
+```
+
+****
+
+### 9. Savings
+
+```{r DEAList saving, collapse=TRUE}
+DEAList <- list()
+
+DEAList <- list(dds = dds,  #same for both
+                AR = list(res = res_dds_ar, 
+                          DEGs = deseqDEGsAR,
+                          resAshr =resAshr_ar,
+                          DEGsAshr = deseqDEGsARashr))
+```
+
+```{r SaveSession, collapse=TRUE}
+# RDS
+saveRDS(DEAList, paste0(SavingFolder, '/ipsc.', 'DEAList_AR.rds')) 
+
+saveRDS(SE_deseq2, paste0(SavingFolder, '/ipsc.', 'SE_deseq2_AR.rds')) 
+
+saveRDS(res_dds_ar, paste0(SavingFolder, '/ipsc.', 'deseqARvsWT.rds')) 
+
+SessionInfo <- sessionInfo()
+Date <- date()
+save.image(paste0(SavingFolder, '/ipsc.', 'DEAnalysisWorkspace_AR.RData'))
+```
+
+***
+
+### **`r paste0('last update on: ', date())`**
+
+***

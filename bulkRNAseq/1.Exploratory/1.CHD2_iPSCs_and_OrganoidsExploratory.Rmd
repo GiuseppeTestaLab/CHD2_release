@@ -1,0 +1,613 @@
+---
+title: "Bulk RNASeq of CHD2 iPSCs and Organoids: Exploratory Analysis"
+author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        theme: 'cosmo'
+        highlight: 'tango'
+        code_folding: hide
+params: 
+    Dataset: 'CHD2_iPSCs_and_organoids_PublicRepo'
+    CountFile: '/group/testa/Project/CHD2/BulkRNAseq/data/Counts/CHD2_bulkRNAseqMergedCounts.txt'
+    DesignFile: '/group/testa/Project/CHD2/BulkRNAseq/data/SampleSheets/CHD2_BulkRNAseq_mergedRuns_SampleSheet.txt'
+    GeneAnnotationFile: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/0a.GeneAnnotation/Output/AnnotationEns101.txt'
+    InputFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/1.Exploratory/Input/'
+    SavingFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/1.Exploratory/Output/Savings/'
+    OutputFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/1.Exploratory/Output/Figures/'
+    CpmFilt: 2
+    SampleFilt: 3
+---
+
+***
+
+```{r Params, collapse=TRUE}
+for (i in 1:length(params))
+  print(paste('Parameter:', names(params)[i], ' - Value:', params[[i]], '- Class:', class(params[[i]])))
+```
+
+***
+
+Parameters specified while running this markdown: 
+
+ * **Dataset**: CHD2_iPSCs_and_organoids_PublicRepo
+ * **CountFile**: countsmatrix.txt. Input files with read counts aggregated at the gene level.   
+ * **DesignFile**: CHD2_BulkRNAseq_mergedRuns_SampleSheet.txt
+ * **GeneAnnotationFile**: reporting gene metadata. It must contain a 'Gene' column reporting GenecodeIDs and and 'EnsGene' column with Ensembl Gene ID.
+ * **CpmFilt**: threshold in cpm (count per million) for the filtering of expressed genes. Set = 2.
+ * **SampleFilt**: minimum number of samples that have to respect the threshold on cpm for the filtering of expressed genes. Set = 3
+
+***
+
+Libraries
+```{r Libraries, collapse = TRUE}
+library(DT)
+library(gridExtra)
+library(SummarizedExperiment)
+library(ggplot2)
+library(dplyr)
+library(edgeR)
+library(org.Hs.eg.db)
+library(RNASeqBulkExploratory)
+source("/group/testa/Project/CHD2/BulkRNAseq/data/HelperFunctions/HelperFunctions.R")
+source("/group/testa/Project/CHD2/BulkRNAseq/data/HelperFunctions/PCA_helper_OL.R")
+source("/group/testa/Project/CHD2/BulkRNAseq/data/HelperFunctions/loadingsPCAZeroVar.R")
+```
+
+```{r Setup, collapse=TRUE}
+Dataset <- params$Dataset
+OutputFolder <- params$OutputFolder
+SavingFolder <- params$SavingFolder
+
+OutputFolder <- ifelse(is.null(params$OutputFolder), getwd(), params$OutputFolder) 
+if (dir.exists(OutputFolder) == FALSE) {
+  dir.create(OutputFolder, recursive=FALSE)
+}
+
+SavingFolder <- ifelse(is.null(params$SavingFolder), getwd(), params$SavingFolder) 
+if (dir.exists(SavingFolder) == FALSE) {
+  dir.create(SavingFolder, recursive=FALSE)
+}
+```
+
+***
+
+
+# All samples: iPSCs, Day25 CO, Day50 CO
+
+### 2. Data Upload
+
+#### 2.1 Read Count Matrix
+
+```{r Data_Counts, fig.height=7, fig.width=7, dpi=300, collapse=TRUE}
+RawCounts <- read.table(params$CountFile, sep='\t', header=T)
+
+rownames(RawCounts) <- NULL
+RawCounts <- RawCounts %>% dplyr::select(Gene, everything())
+
+colSums(RawCounts[, -1])
+
+libsizeplot <- data.frame(libsize = colSums(RawCounts[, -1])) %>% 
+  ggplot(., aes(y=rownames(.), x=libsize)) +
+    geom_col(size=0.75, col='black') +
+    labs(x='Library Size', y='Sample') +
+    theme_bw() + 
+    theme(axis.text = element_text(size=13, colour = 'black'), legend.key.size = unit(2.5, "line"), 
+        legend.text = element_text(size=15), axis.title = element_text(size=15))
+                       
+
+libsizeplot
+```
+
+```{r CountMatrix quick checks, collapse=TRUE}
+length(which(duplicated(RawCounts$Gene) == TRUE))
+length(RawCounts$Gene)
+length(unique(RawCounts$Gene))
+```
+
+#### 2.2 Retrieve Annotation from GeneAnnotation table and match Gene columns
+
+```{r Retrieve GeneAnnotation table, collapse=TRUE}
+GeneAnnotation <- read.table(params$GeneAnnotationFile, sep='\t', header=TRUE)
+```
+
+```{r Match gene order between RawCounts and GeneAnnotation tables, collapse=TRUE}
+GeneAnnotation <- GeneAnnotation[match(RawCounts$Gene, GeneAnnotation$Gene), ] #give same order of dataset
+```
+
+```{r Check gene order between RawCounts and GeneAnnotation tables, collapse=TRUE}
+if(!identical(nrow(RawCounts), nrow(GeneAnnotation))){
+  stop('RawCounts and GeneAnnotation have different number of rows')
+}
+
+if(all(!identical(RawCounts$Gene, GeneAnnotation$Gene))){
+  stop('Genes in RawCounts and GeneAnnotation are different')
+}
+
+dim(RawCounts)
+dim(GeneAnnotation)
+
+identical(RawCounts$Gene, GeneAnnotation$Gene)
+```
+
+#### 2.3 GeneAnnotation table sanity checks
+
+```{r SanityChecks, collapse=TRUE}
+if ('hgnc_symbol' %in% colnames(GeneAnnotation)){
+  GeneAnnotation <- dplyr::rename(GeneAnnotation, HGNCSymbol=hgnc_symbol)
+}
+
+if ('external_gene_name' %in% colnames(GeneAnnotation)){
+  GeneAnnotation <- dplyr::rename(GeneAnnotation, GeneName=external_gene_name)
+}
+
+if ('gene_biotype' %in% colnames(GeneAnnotation)){
+  GeneAnnotation <- dplyr::rename(GeneAnnotation, GeneBiotype=gene_biotype)
+}
+
+if ('chromosome_name' %in% colnames(GeneAnnotation)){
+  GeneAnnotation <- dplyr::rename(GeneAnnotation, Chr=chromosome_name)
+}
+
+if ('start_position' %in% colnames(GeneAnnotation)){
+  GeneAnnotation <- dplyr::rename(GeneAnnotation, Start=start_position)
+}
+
+if ('end_position' %in% colnames(GeneAnnotation)){
+  GeneAnnotation <- dplyr::rename(GeneAnnotation, End=end_position)
+}
+```
+
+#### 2.4 Specify experimental design and generate sample table
+
+##### 2.4.1 Import SampleSheet
+
+```{r Design, message=FALSE}
+Design <- read.table(params$DesignFile, sep='\t', header=TRUE)
+```
+
+##### 2.4.2 Interactive table
+
+```{r Interactive Table, message=FALSE}
+as.data.frame(lapply(Design, factor)) %>%
+  DT::datatable(class='hover', rownames=FALSE, caption='Sample identity and attributes',
+                filter='top', escape=TRUE, extension='Buttons',
+                options=list(pageLength=11, scrollX=T, dom='Bfrtip', buttons=list(I('colvis'), c('csv', 'excel'))))
+```
+
+#### 2.5 Set ENSG as rownames and drop gene columns (but keep for later use)
+
+```{r Clean dataset and annotation, collapse=TRUE}
+if(all(RawCounts$Gene %in% GeneAnnotation$Gene) == FALSE){
+    stop('ERROR! Count matrix rownames and annotation matrix are not consistent.') #final check that dataset and annotation are consistent
+}
+
+dim(RawCounts)
+dim(GeneAnnotation)
+```
+
+
+***
+
+
+### 3. Read Counts density 
+
+```{r ReadCount Density plot}
+DensityRaw <- readCountDensityplot(countTable=RawCounts, GeneCol ='Gene', dgelist=FALSE, #Change Gene to gene to match counts matrix colname
+                                   plotTitle='Raw Counts before filtering', prior.count=0.25, adjustment=0.5)
+DensityRaw
+```
+
+***
+
+
+### 4. SummarizedExperiment
+
+#### 4.1 Consistency checks
+
+```{r Consistency checks, collapse=TRUE, echo=T, results='hide'}
+tmp <- RawCounts
+o <- GeneAnnotation
+
+#CountsMatrix
+rownames(tmp) <- tmp$Gene
+checkCounts(tmp, showDuplicates = FALSE)
+
+#Design
+checkDesign(Design, tmp[,-1]) #without the Gene column (in position 1)
+
+#Annotation
+o$EnsGene <- o$Gene #overwrite EnsGene column with info from Gene (containing gene version)
+checkGeneAnno(o, tmp[,-1]) #without the Gene column (in position 1)
+
+rm(tmp)
+rm(o)
+```
+
+#### 4.2 Create SummatizedExperiment object (direct function)
+
+```{r Create SE automated, collapse=TRUE}
+SE <- createSE(RawCounts, Design, GeneAnnotation, showDuplicates = TRUE, roundCounts = TRUE)
+
+#colData(SE)
+```
+
+#### 4.3 Set ENSG with version as rownames
+
+```{r Set SE rownames, collapse=TRUE}
+rownames(SE) <- rowData(SE)$Gene #ENSG.version are unique 
+```
+
+****
+
+
+### 5. Biotypes selection
+
+The purpose of this step is to discard all RNA species except for coding genes and lncRNAs.
+
+#### 5.1 Biotype-selected SE
+
+```{r BiotypeSel, collapse=TRUE}
+SE_Bio <- biotypeSelectSE(SE, lncRNA=TRUE, otherBios=NULL, showRemoved=TRUE)
+RemovedGenes <- SummarizedExperiment::rowData(SE)[!(SummarizedExperiment::rowData(SE) %in% 
+                                                      SummarizedExperiment::rowData(SE_Bio)), ]
+```
+
+**After the gene selection based on biotypes, the dataset is structured in *`r dim(SE_Bio)[1]` genes* measured in *`r dim(SE_Bio)[2]` samples*. **
+**`r dim(RemovedGenes)[1]` genes have been discarded.**
+
+#### 5.2 Diagnostic Barplots {.tabset}
+
+##### Percentage of Reads associated to most expressed gene
+
+```{r RemovedGenesII, fig.align='center', fig.width=9, fig.height=5, collapse=TRUE}
+plotCompareMax(SE, SE_Bio, PlotTitle=NULL, Interactive=TRUE)
+```
+
+##### Percentage of Removed Reads after biotype selection
+
+```{r RemovedGenes, fig.align='center', fig.width=9, fig.height=5, collapse=TRUE}
+plotComparePerc(SE, SE_Bio, PlotTitle=NULL, Interactive=TRUE)
+```
+
+
+****
+
+
+**The dataset is structured in `r dim(SE)[1]` genes measured in `r dim(SE)[2]` samples.**
+
+
+### 6. Gene expression filtering and SE normalization 
+
+#### 6.1 Setting gene filtering thresholds
+
+```{r FiltThresholds, collapse=TRUE}
+CpmFilt <- params$CpmFilt
+if(is.numeric(CpmFilt)==FALSE){
+  stop('ERROR! Cpm threshold for gene filtering has a non-numeric value')
+}
+
+SampleFilt <- ifelse(params$SampleFilt=='Default', dim(SE_Bio)[2]/2, params$SampleFilt)
+if(is.numeric(SampleFilt)==FALSE){
+  stop('ERROR! Sample threshold for gene filtering has a non-numeric value')
+}
+```
+
+**__Genes having an expression lower than *`r CpmFilt` CPM* in at least *`r SampleFilt` samples* are filtered out.__**
+
+#### 6.2 Filter out low expressed genes
+
+ * Compute temporary cpm (without TMM normalization, not stored in SE)
+ * Filter out lowly-expressed genes
+
+```{r SE_Filt, collapse=TRUE}
+SE$lib.size
+SE_Filt <- filterSE(SE_Bio, cpmTh=CpmFilt, sampleTh=SampleFilt)
+SE_Filt$lib.size
+```
+
+#### 6.3 Normalize 
+
+ * Re-calculate library size and calculate TMM
+ * Calculate cpm and logCpm (with normalization) and store in SE_Filt
+
+```{r SE_norm, collapse=TRUE}
+SE_Filt <- normTmmSE(SE_Filt, useNormFactors=TRUE, priorCount=0.25)  
+```
+
+**__After filtering out lowly-expressed genes, the dataset is structured in *`r dim(SE_Filt)[1]` genes* measured in *`r dim(SE_Filt)[2]` samples*.__**
+
+***
+
+
+### 7. Diagnostic barplots on normalized data 
+
+#### 7.1 Barplot for library size {.tabset}
+
+ * Barplot showing for each sample the initial library size; plot is centered on the mean value   
+ * Barplot with the same visualization after filtering on Cpm threshold    
+
+##### Library size before filtering
+
+```{r BarPlotLibraryI, fig.aling='center', fig.width=9, fig.height=5.5, message=FALSE}
+librarySizeBarplot(SE, PlotTitle='Before Filtering', Interactive=TRUE)
+```
+
+##### Library size after filtering
+
+```{r BarPlotLibraryII, fig.aling='center', fig.width=9, fig.height=5.5, message=FALSE}
+b1 <- librarySizeBarplot(SE, PlotTitle='Before Biotype Selection', Interactive=FALSE)
+lim_y <- layer_scales(b1)$y$range$range
+
+librarySizeBarplot(SE_Filt, PlotTitle='After Cpm Filtering', Interactive=TRUE, ylim=lim_y)
+```
+
+#### 7.2 Barplot for TMM and expressed genes {.tabset}
+
+ * Barplot showing for each sample the TMM value as calculated by edgeR and used in the normalization  
+ * Barplot represents in each sample the number of 'expressed' genes. The evaluation is done on SE before the gene filtering step and applying the specified Cpm threshold separately to each sample.   
+
+##### TMM Barplot
+
+```{r BarPlotTMM, fig.align='center', fig.width=9, fig.height=5}
+tMMBarplot(SE_Filt, Interactive=TRUE)
+```
+
+##### Barplot for genes with Cpm higher than threshold
+
+```{r BarPlotExpGenes, fig.align='center', fig.width=9, fig.height=5, message=FALSE}
+expressedGeneBarplot(SE, PlotTitle='Before Filtering', cpmth=CpmFilt, Interactive=TRUE)
+```
+
+
+****
+
+
+### 8. Density plot for Count distribution after filtering 
+
+Similarly to raw counts, I represent by density plot the count distribution also after filtering.
+
+```{r DensityFilt, fig.align='center', fig.width=9, fig.height=4.5}
+readCountDensityplot(assays(SE_Filt)$counts, plotTitle='Filtered Dataset')
+```
+
+***
+
+
+### 9. Sample-to-sample correlation 
+
+Correlation matrix across samples calculated on the basis of the Spearman correlation. Heatmap annotation takes into consideration sample 'Condition'.
+
+```{r HeatmapSize, collapse=TRUE}
+# Set heatmap size on the basis of the number of samples
+Width <- 7 + (dim(SE_Filt)[2]- 8) * 0.24
+Width <- ifelse(Width<=14, Width, 14)
+Height <- 5 + (dim(SE_Filt)[2]- 8) * 0.22
+```
+
+```{r SampleCorr, fig.align='center', fig.width=10, fig.height=8, dpi=300}
+sampleCorrHeatmap(SE_Filt, cor_method='spearman', plotTitle='Filtered dataset', annotation_colors=NULL, display_numbers=TRUE, annotation_col = c('Timepoint', 'Genotype'))
+```
+
+
+***
+
+
+### 10. Principal Component Analysis 
+
+```{r PCACol, collapse=TRUE}
+if('Color' %in% names(Design)){
+  Cols <- dplyr::select(Design, c(Genotype, Color)) %>% dplyr::arrange(Genotype) 
+  Cols <- as.character(Cols[!duplicated(Cols$Genotype), ]$Color)
+  } else {
+    Cols <- NULL
+    }
+```
+
+
+##### 10.1 PCA with Features {.tabset}
+
+#### All Samples
+
+```{r PCAFeatures, fig.width=10, fig.height=10, dpi = 600, warning=FALSE}
+#PCA1 <- loadingsPCA(SE_Filt, components = c(1,2), condition = c('Genotype', 'Timepoint'), nFeatures = 10)
+
+SE_Filt_GeneNames <- SE_Filt
+SE_Filt_GeneNames <- SE_Filt_GeneNames[!duplicated(rowData(SE_Filt_GeneNames)$GeneName), ] #drop non-unique GeneNames
+rownames(SE_Filt_GeneNames) <- rowData(SE_Filt_GeneNames)$GeneName #use GeneNames as rownames
+
+loadingsPCA(SE_Filt_GeneNames, components = c(1,2), condition = c('Genotype', 'Timepoint'), nFeatures = 15)
+```
+
+#### Organoids
+
+```{r PCAFeatures_Organoids, fig.width=10, fig.height=10, dpi = 600, warning=FALSE}
+SE_Filt_GeneNames_organoids <- SE_Filt_GeneNames[, colData(SE_Filt_GeneNames)$Timepoint != 'd0']
+
+loadingsPCAZeroVar(SE_Filt_GeneNames_organoids, components = c(1,2), condition = c('Genotype', 'Timepoint'), nFeatures = 15)
+
+ggsave(filename = paste0(OutputFolder, 'PCA_organoids_loadings_bulkRNAseq.pdf'), width = 5, height = 5)
+```
+
+#### Organoids day25
+
+```{r PCAFeatures_Organoids_25, fig.width=10, fig.height=10, dpi = 600}
+loadingsPCAZeroVar(SE_Filt_GeneNames_organoids[, colData(SE_Filt_GeneNames_organoids)$Timepoint == 'd25'], components = c(1,2), condition = c('Genotype', 'Timepoint'), nFeatures = 15)
+```
+
+#### Organoids day50
+
+```{r PCAFeatures_Organoids_50, fig.width=10, fig.height=10, dpi = 600}
+loadingsPCAZeroVar(SE_Filt_GeneNames_organoids[, colData(SE_Filt_GeneNames_organoids)$Timepoint == 'd50'], components = c(1,2), condition = c('Genotype', 'Timepoint'), nFeatures = 15)
+```
+
+
+***
+
+#### 10.2 PCA minimal
+
+```{r PCA1, fig.align='center', fig.width=2, fig.height=2, dpi = 300}  
+pcaGenotype1 <- pcaSE(SE_Filt, PlotTitle='First-Second Component', condition="Genotype", Interactive=TRUE)
+
+pcaGenotype2 <- pcaSE(SE_Filt, PlotTitle='Second-Third Component', components = c(2,3), condition="Genotype", Interactive=TRUE)
+```
+
+```{r PCA2, fig.align='center', fig.width=2, fig.height=2, dpi = 300}  
+pcaTimepoint1 <- pcaSE(SE_Filt, PlotTitle='First-Second Component', condition="Timepoint", Interactive=TRUE)
+
+pcaTimepoint2 <- pcaSE(SE_Filt, PlotTitle='Second-Third Component', components = c(2,3), condition="Timepoint", Interactive=TRUE)
+```
+
+```{r PCA3, fig.align='center', fig.width=2, fig.height=2, dpi = 300}  
+pcaBatch <- pcaSE(SE_Filt, PlotTitle='First-Second Component', condition="Batch", Interactive=TRUE)
+```
+
+##### Genotype PC1-PC2
+
+```{r PCA Genotype 1, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaGenotype1
+```
+
+##### Genotype PC2-PC3
+
+```{r PCA Genotype 2, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaGenotype2
+```
+
+##### Timepoint PC1-PC2
+
+```{r PCA Timepoint 1, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaTimepoint1
+```
+
+##### Timepoint PC2-PC3
+
+```{r PCA Timepoint 2, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaTimepoint2
+```
+
+##### Batch PC1-PC2
+
+```{r PCA Batch, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaBatch
+```
+
+***
+
+
+#### 10.3 Timepoints-wise {.tabset}
+
+```{r PCA by time, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}
+#iPSCs
+ips.se <- SE_Filt[, SE_Filt$Timepoint == 'd0']
+pcaIPS <- pcaSE(ips.se, PlotTitle='First-Second Component iPSCs', condition="Genotype", Interactive=TRUE)
+
+#Day25
+d25.se <- SE_Filt[, SE_Filt$Timepoint == 'd25']
+pcaD25 <- pcaSE(d25.se, PlotTitle='First-Second Component CO day25', condition="Genotype", Interactive=TRUE)
+
+#Day50
+d50.se <- SE_Filt[, SE_Filt$Timepoint == 'd50']
+pcaD50 <- pcaSE(d50.se, PlotTitle='First-Second Component CO day50', condition="Genotype", Interactive=TRUE)
+```
+
+##### iPSCs
+
+```{r PCA iPSCs, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaIPS
+```
+
+##### Day25
+
+```{r PCA Day25, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaD25
+```
+
+##### Day50
+
+```{r PCA Day50, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaD50
+```
+
+***
+
+#### 10.3 Organoids {.tabset}
+
+```{r PCA Organoids, fig.align='center', fig.width=2, fig.height=2, dpi = 300}  
+ORG.se <- SE_Filt[, SE_Filt$Timepoint != 'd0']
+
+pcaORGsGenotype1 <- pcaSE(ORG.se, PlotTitle='First-Second Component CO', condition="Genotype", Interactive=TRUE)
+pcaORGsGenotype2 <- pcaSE(ORG.se, PlotTitle='Second-Third Component CO', components = c(2,3), condition="Genotype", Interactive=TRUE)
+
+pcaORGsTimepoint1 <- pcaSE(ORG.se, PlotTitle='First-Second Component CO', condition="Timepoint", Interactive=TRUE)
+pcaORGsTimepoint2 <- pcaSE(ORG.se, PlotTitle='Second-Third Component CO', components = c(2,3), condition="Timepoint", Interactive=TRUE)
+
+pcaORGsBatch <- pcaSE(ORG.se, PlotTitle='First-Second Component CO', condition="Batch", Interactive=TRUE)
+```
+
+##### Genotype PC1-PC2
+
+```{r PCA Organoids Genotype 1, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaORGsGenotype1
+```
+
+##### Genotype PC2-PC3
+
+```{r PCA Organoids Genotype 2, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaORGsGenotype2
+```
+
+##### Timepoint PC1-PC2
+
+```{r PCA Organoids Timepoint 1, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaORGsTimepoint1
+```
+
+##### Timepoint PC2-PC3
+
+```{r PCA Organoids Timepoint 2, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaORGsTimepoint2
+```
+
+##### Batch PC1-PC2
+
+```{r PCA Organoids Batch, fig.align='center', fig.width=2.5, fig.height=2, dpi = 300}  
+pcaORGsBatch
+```
+
+
+***
+
+
+### 11. Savings
+
+Saved objects 
+
+ * Intial SE without any filtering
+ * SE_Filt after expressed gene selection and normalization
+ * Analysis image
+
+```{r SaveSession, collapse=TRUE}
+saveRDS(SE, paste0(SavingFolder, '', Dataset, 'SE.rds')) 
+
+saveRDS(SE_Bio, paste0(SavingFolder, '', Dataset, 'SE_Bio.rds'))
+
+saveRDS(SE_Filt, paste0(SavingFolder, '', Dataset, 'SE_Filt.rds')) 
+
+SessionInfo <- sessionInfo()
+Date <- date()
+save.image(paste0(SavingFolder, '', Dataset, 'ExploratoryAnalysisWorkspace.RData'))
+```
+
+```{r SessionInfo, collapse=TRUE}
+SessionInfo
+Date
+``` 
+
+***
+
+### **`r paste0('last update on: ', date())`**
+
+***

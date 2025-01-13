@@ -1,0 +1,158 @@
+---
+title: "Gene Length from GTF file"
+author: "Cristina Cheroni"
+contributing author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        theme: 'cosmo'
+        highlight: 'tango'
+        code_folding: hide
+params:
+    Specie: 'hsapiens'
+    GTFFile: '/group/testa/Project/CHD2/BulkRNAseq/data/Annotations/gencode.v35.annotation.gtf'
+    OutputFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/0b.GeneLength/Output/'
+---
+
+## 1. Environment Set Up
+
+### 1.1 Libraries
+
+```{r EnvironmentSetupII, collapse=TRUE}
+library(GenomicRanges)
+library(rtracklayer)
+library(GenomicFeatures)
+```
+
+
+### 1.2 Input and Output folders 
+
+```{r FolderSetting, collapse=TRUE}
+GTFFile <- params$GTFFile
+OutputFolder <- params$OutputFolder
+```
+
+****
+
+## 2. Input: GTF file
+
+The input file for this procedure is a GTF file, that can be downloaded from a series of sources. Here I use the Gencode GTF, version 35 basic, that has been downloaded from Gencode website (main GTF with annotation of chromosomal genes) with *wget https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_35/gencode.v35.basic.annotation.gtf.gz*
+
+[Genecode V35 GTF](https://www.gencodegenes.org/human/release_35.html). The CHR GTF is downloaded and put in the folder: 
+/group/testa/Project/CHD2/BulkRNAseq/data/Annotations/gencode.v35.annotation.gtf
+
+
+****
+
+## 3. Gene length: first strategy
+
+The first procedure to retrieve gene length is based on the examples at the following links_
+[GitHub example)](https://github.com/dpryan79/Answers/blob/master/SEQanswers_42420/GTF2LengthGC.R)
+[SeqAnswer](http://seqanswers.com/forums/archive/index.php/t-39797.html)
+
+I modify a little the code for the example to make it works: in the first call of elementMetadata I substitute Length with NROWS. I also use as.matrix, rather than transpose, for the output. 
+
+### 3.1 Definition of calc_length function
+
+```{r, collapse=TRUE}
+calc_length <- function(x) {
+  sum(elementMetadata(x)$widths)
+}
+```
+
+### 3.2 Import of GTF file 
+
+```{r, collapse=TRUE}
+#GTF <- import.gff(GTFFile, format="gtf", genome=NA, asRangedData=F, feature.type="exon")
+GTF <- rtracklayer::import.gff(GTFFile, format='gtf', genome='GRCh38', feature.type='exon')
+grl <- GenomicRanges::reduce(split(GTF, elementMetadata(GTF)$gene_id))
+
+reducedGTF <- unlist(grl, use.names=T) #GenomicRanges object
+
+elementMetadata(reducedGTF)$gene_id <- rep(names(grl), elementNROWS(grl))
+elementMetadata(reducedGTF)$widths <- width(reducedGTF)
+```
+
+ * GTF is a GRanges object with 1643438 ranges and 21 metadata columns. 
+ * grl is a GRangesList object; the list contains 62750 elements (genes, identifier ENSG with Genecode version). 
+ * reducedGTF is a GRanges object with 6 ranges and 2 metadata columns. It contains several genomic ranges for each gene, probably exon coordinates. 
+
+
+### 3.3 Apply calc_length function to GTF 
+
+```{r, collapse=TRUE}
+GeneLenghtG35 <- (as.data.frame(sapply(split(reducedGTF, elementMetadata(reducedGTF)$gene_id), calc_length)))
+# It takes about 10 mins to obtain the result for the line above
+GeneLenghtG35$Gene <- row.names(GeneLenghtG35)
+GeneLenghtG35 <- GeneLenghtG35[,c(2,1)]
+colnames(GeneLenghtG35) <- c('Gene', 'Length')
+dim(GeneLenghtG35)
+```
+
+From the reducedGTF, the gene length is the sum of the exons assigned to that sample. As output, a data frame is produced, reporting the length for each of the input genes (ENSG + version). 
+
+
+****
+
+## 4. Gene length: second strategy
+
+I use a second approach, based on GenomicFeature library. 
+
+### 4.1 Generation of transcript database
+
+```{r, collapse=TRUE}
+#txdb <- makeTranscriptDbFromGFF(GTFShort,format="gtf") Function changes, substituted as below
+txdb <- GenomicFeatures::makeTxDbFromGFF(GTFFile, format="gtf")
+# takes about 5 minutes. It creates the transcript database? 
+```
+
+### 4.2 Calculation of exonic gene size
+
+First collects exons per gene id, then for each gene reduce the exons to a set of non-overlapping exons, calculate their lengths and sum them. The output is a list reporting for each gene its size.
+
+```{r, collapse=TRUE}
+#Collect the exons per gene id
+ExonsPerGene <- GenomicFeatures::exonsBy(txdb,by="gene")
+# then for each gene, reduce all the exons to a set of non overlapping exons, calculate their lengths (widths) and sum them.
+ExonicGeneSize <- lapply(ExonsPerGene,function(x){sum(width(reduce(x)))}) # it takes several minutes
+head(ExonicGeneSize)
+```
+
+### 4.3 Generate a data frame with gene lenghts
+
+```{r, collapse=TRUE}
+GeneLenghtG35v2 <- as.data.frame(unlist(ExonicGeneSize))
+GeneLenghtG35v2$Gene <- row.names(GeneLenghtG35v2)
+GeneLenghtG35v2 <- GeneLenghtG35v2[,c(2,1)]
+colnames(GeneLenghtG35v2) <- c('Gene', 'Length')
+dim(GeneLenghtG35v2)
+head(GeneLenghtG35v2)
+```
+
+
+****
+
+## 5. Result comparison and saving
+
+### 5.1 Compare results across approaches
+
+```{r, collapse=TRUE}
+identical(GeneLenghtG35v2, GeneLenghtG35)
+
+if(!identical(GeneLenghtG35v2, GeneLenghtG35)){
+  stop('The two approaches result in a different output')
+}
+```
+
+The output generated by the two approaches is coherent. 
+
+### 5.2 Save
+
+```{r SaveTable, collapse=TRUE}
+write.table(GeneLenghtG35, file=paste0(OutputFolder,'GenecodeV35GeneLength.txt'), sep='\t', row.names=FALSE, quote=FALSE)
+saveRDS(GeneLenghtG35, paste0(OutputFolder, 'GeneLengthFirstApproach.rds')) 
+saveRDS(GeneLenghtG35v2, paste0(OutputFolder, 'GeneLengthSecondApproach.rds')) 
+```
+

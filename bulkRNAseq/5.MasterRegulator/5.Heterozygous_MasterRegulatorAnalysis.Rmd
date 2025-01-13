@@ -1,0 +1,228 @@
+---
+title: "Master Regulator Analysis"
+author: "Oliviero Leonardi"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        theme: 'yeti'
+        highlight: 'kate'
+        code_folding: hide
+params:
+    Dataset: 'CHD2_iPSCs_and_organoids_PublicRepo'
+    InputFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/2.DEA/'
+    OutputFolder: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/5.MRAnalysis/Output/'
+    FiguresOut: '/group/testa/Project/CHD2/BulkRNAseq/results/PublicRepo/5.MRAnalysis/Output/Figures/'
+    logFCthr: 1.5
+    FDRthr: 0.05
+    Enricthr: 1.15
+---
+
+```{r EnvironmentSetupI, include=FALSE}
+for (i in 1:length(params))
+  print(paste('Parameter:', names(params)[i], ' - Value:', params[[i]], '- Class:', class(params[[i]])))
+```
+
+```{r include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(overlapper)
+source('/group/testa/Project/CHD2/BulkRNAseq/data/HelperFunctions/MRA.R')
+load('/group/testa/Project/CHD2/BulkRNAseq/data/GeneSets/tfbs.hs.pluripotent.RData')
+```
+
+***
+
+### Read gene {.tabset}
+
+```{r collapse=TRUE}
+allgenes.ht.ipsc <- readRDS(paste0(params$InputFolder, 'iPSCs/Output/Savings/ipsc.deseqHTvsWT.rds'))
+
+allgenes.ht.d25 <- readRDS(paste0(params$InputFolder, 'day25/Output/Savings/day25CbO.deseqHTvsWT.rds'))
+
+allgenes.ht.d50 <- readRDS(paste0(params$InputFolder, 'day50/Output/Savings/day50CbO.deseqHTvsWT.rds'))
+
+#allgenes.ht.covTime <- readRDS(paste0(params$InputFolder, 'covTimepoint/Output/Savings/covTimepoint.CbO.deseqHTvsWT.rds'))
+```
+
+### Filter logFC and FDR
+
+**logFC threshold: `r params$logFCthr`**
+**FDR threshold: `r params$FDRthr`**
+
+```{r collapse=TRUE}
+degs.ht.ipsc <- data.frame(subset(allgenes.ht.ipsc, abs(allgenes.ht.ipsc$log2FoldChange) > log2(params$logFCthr) & allgenes.ht.ipsc$padj < params$FDRthr))
+
+degs.ht.d25 <- data.frame(subset(allgenes.ht.d25, abs(allgenes.ht.d25$log2FoldChange) > log2(params$logFCthr) & allgenes.ht.d25$padj < params$FDRthr))
+
+degs.ht.d50 <- data.frame(subset(allgenes.ht.d50, abs(allgenes.ht.d50$log2FoldChange) > log2(params$logFCthr) & allgenes.ht.d50$padj < params$FDRthr))
+
+#degs.ht.covTime <- data.frame(subset(allgenes.ht.covTime, abs(allgenes.ht.covTime$log2FoldChange) > log2(params$logFCthr) & allgenes.ht.covTime$padj < params$FDRthr))
+```
+
+### Rownames to column
+
+#### iPSCs
+```{r, collapse=TRUE}
+allgenes.ht.ipsc <- data.frame(allgenes.ht.ipsc)
+allgenes.ht.ipsc <- allgenes.ht.ipsc %>% tibble::rownames_to_column("gene_id")
+
+degs.ht.ipsc <- degs.ht.ipsc %>% tibble::rownames_to_column("gene_id")
+```
+
+#### Day25
+```{r collapse=TRUE}
+allgenes.ht.d25 <- data.frame(allgenes.ht.d25)
+allgenes.ht.d25 <- allgenes.ht.d25 %>% tibble::rownames_to_column("gene_id")
+
+degs.ht.d25 <- degs.ht.d25 %>% tibble::rownames_to_column("gene_id")
+```
+
+#### Day50
+```{r collapse=TRUE}
+allgenes.ht.d50 <- data.frame(allgenes.ht.d50)
+allgenes.ht.d50 <- allgenes.ht.d50 %>% tibble::rownames_to_column("gene_id")
+
+degs.ht.d50 <- degs.ht.d50 %>% tibble::rownames_to_column("gene_id")
+```
+
+#### covTimepoint
+```{r collapse=TRUE}
+# allgenes.ht.covTime <- data.frame(allgenes.ht.covTime)
+# allgenes.ht.covTime <- allgenes.ht.covTime %>% tibble::rownames_to_column("gene_id")
+# 
+# degs.ht.covTime <- degs.ht.covTime %>% tibble::rownames_to_column("gene_id")
+```
+
+***
+
+```{r collapse=TRUE}
+Enrichment_Threshold <- params$Enricthr
+```
+
+### Master Regulator Analysis
+
+#### iPSCs
+
+##### Heterozygous
+```{r fig.width=7, fig.height=5, warning=FALSE, dpi=300, collapse=TRUE}
+MRanalysis_iPS_ht <- tf.enrichment(allGene = allgenes.ht.ipsc$gene_id, deGenes = degs.ht.ipsc$gene_id, celltype="pluripotent", add=F, cutoff=1, org="hs")
+
+MRanalysis_iPS_ht$TF <- rownames(MRanalysis_iPS_ht)
+
+a_ht <- MRanalysis_iPS_ht %>% filter(enrichment > Enrichment_Threshold)
+
+plot_ips_ht <- ggplot(MRanalysis_iPS_ht, aes(x=enrichment, y=-log10(FDR))) +
+  geom_point(size=1.5, col=ifelse(MRanalysis_iPS_ht$enrichment > Enrichment_Threshold, 'darkred', 'black')) +
+  geom_vline(xintercept=Enrichment_Threshold, col='darkred', alpha=0.75) +
+  scale_color_continuous(ifelse(MRanalysis_iPS_ht$enrichment > Enrichment_Threshold, 'blue', 'black')) +
+  theme(legend.position = 'none') +
+  ggrepel::geom_label_repel(data=a_ht, label=a_ht$TF, colour = 'black', size=3.5) +
+  theme_bw() +
+  theme(panel.border = element_rect(colour='black'),
+        axis.text = element_text(color = 'black')) +
+  labs(x='Enrichment')
+
+pdf(file = paste0(params$FiguresOut, 'MRanlysis.ipsc_ht.pdf'), width = 5, height = 4)
+plot_ips_ht
+dev.off()
+
+plot_ips_ht
+```
+
+```{r collapse=TRUE}
+MRanalysis_iPS_ht[, -c(6,7)] %>% DT::datatable(class='hover', rownames=TRUE, escape=TRUE, extension='Buttons', 
+                options=list(dom='Bfrtip', buttons=list(I('colvis'), c('csv', 'excel'))))
+```
+
+
+
+***
+
+
+
+#### Day25 CbO
+
+##### Heterozygous
+```{r fig.width=7, fig.height=5, warning=FALSE, dpi=300, collapse=TRUE}
+MRanalysis_d25_ht <- tf.enrichment(allGene = allgenes.ht.d25$gene_id, deGenes = degs.ht.d25$gene_id, celltype="pluripotent", add=F, cutoff=1, org="hs")
+
+MRanalysis_d25_ht$TF <- rownames(MRanalysis_d25_ht)
+
+b_ht <- MRanalysis_d25_ht %>% filter(enrichment > Enrichment_Threshold)
+
+plot_d25_ht <- ggplot(MRanalysis_d25_ht, aes(x=enrichment, y=-log10(FDR))) +
+  geom_point(size=1.5, col=ifelse(MRanalysis_d25_ht$enrichment > Enrichment_Threshold, 'darkred', 'black')) +
+  geom_vline(xintercept=Enrichment_Threshold, col='darkred', alpha=0.75) +
+  scale_color_continuous(ifelse(MRanalysis_d25_ht$enrichment > Enrichment_Threshold, 'blue', 'black')) +
+  theme(legend.position = 'none') +
+  ggrepel::geom_label_repel(data=b_ht, label=b_ht$TF, colour = 'black', size=3.5) +
+  theme_bw() +
+  theme(panel.border = element_rect(colour='black'),
+        axis.text = element_text(color = 'black')) +
+  labs(x='Enrichment')
+
+pdf(file = paste0(params$FiguresOut, 'MRanlysis.day25_ht.pdf'), width = 5, height = 4)
+plot_d25_ht
+dev.off()
+
+plot_d25_ht
+```
+
+```{r collapse=TRUE}
+MRanalysis_d25_ht[, -c(6,7)] %>% DT::datatable(class='hover', rownames=TRUE, escape=TRUE, extension='Buttons', 
+                options=list(dom='Bfrtip', buttons=list(I('colvis'), c('csv', 'excel'))))
+```
+
+
+***
+
+
+
+#### Day50 CbO 
+
+##### Heterozygous
+```{r fig.width=7, fig.height=5, warning=FALSE, dpi=300, collapse=TRUE}
+MRanalysis_d50_ht <- tf.enrichment(allGene = allgenes.ht.d50$gene_id, deGenes = degs.ht.d50$gene_id, celltype="pluripotent", add=F, cutoff=1, org="hs")
+
+MRanalysis_d50_ht$TF <- rownames(MRanalysis_d50_ht)
+
+c_ht <- MRanalysis_d50_ht %>% filter(enrichment > Enrichment_Threshold)
+
+plot_d50_ht <- ggplot(MRanalysis_d50_ht, aes(x=enrichment, y=-log10(FDR))) +
+  geom_point(size=1.5, col=ifelse(MRanalysis_d50_ht$enrichment > Enrichment_Threshold, 'darkred', 'black')) +
+  geom_vline(xintercept=Enrichment_Threshold, col='darkred', alpha=0.75) +
+  scale_color_continuous(ifelse(MRanalysis_d50_ht$enrichment > Enrichment_Threshold, 'blue', 'black')) +
+  theme(legend.position = 'none') +
+  ggrepel::geom_label_repel(data=c_ht, label=c_ht$TF, colour = 'black', size=3.5) +
+  theme_bw() +
+  theme(panel.border = element_rect(colour='black'),
+        axis.text = element_text(color = 'black')) +
+  labs(x='Enrichment')
+
+pdf(file = paste0(params$FiguresOut, 'MRanlysis.day50_ht.pdf'), width = 5, height = 4)
+plot_d50_ht
+dev.off()
+
+plot_d50_ht
+```
+```{r collapse=TRUE}
+MRanalysis_d50_ht[, -c(6,7)] %>% DT::datatable(class='hover', rownames=TRUE, escape=TRUE, extension='Buttons', 
+                options=list(dom='Bfrtip', buttons=list(I('colvis'), c('csv', 'excel'))))
+```
+
+
+***
+
+```{r collapse=TRUE}
+sessionInfo()
+```
+
+
+***
+
+### **`r paste0('last update on: ', date())`**
+
+***
