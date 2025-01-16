@@ -1,0 +1,467 @@
+---
+title: "CHD2 Archaics"
+author: "AV 2024"
+output: html_notebook
+---
+
+```{r}
+
+cell_types <- c("CycPg", "DirectN", "DirectP", "IndirectN","IndirectP")
+
+# Parse filenames and get cell type specific files
+extract_cell_type <- function(filename, cell_types) {
+  for (cell_type in cell_types) {
+    if (grepl(cell_type, filename)) {
+      return(cell_type)
+    }
+  }
+  return(NA)  # in case filenames don't contain the expected cell type names
+}
+
+# generate two lists of files for DEA and GRN (they should be in the same amount, and same cell types)
+DEAlist <- list.files("~/Desktop/CHD2/MasterRegulatory_arch/DEA/",pattern = "*.tab")
+GRNlist <- list.files("~/Desktop/CHD2/MasterRegulatory_arch/GRN/",pattern = "*.csv")
+
+# function for hypergeometric test
+
+overlap.prob <- function (set1, set2, universe, lower = F) 
+{
+  set1 <- as.character(set1)
+  set2 <- as.character(set2)
+  if (class(universe) == "character") {
+    set1 <- intersect(set1, universe)
+    set2 <- intersect(set2, universe)
+    universe <- length(unique(universe))
+  }
+  set1 <- unique(set1)
+  set2 <- unique(set2)
+  ov <- sum(set1 %in% set2)
+  phyper(max(0, ov - 1), length(set1), universe - length(set1), 
+         length(set2), lower.tail = lower)
+}
+
+# extract DEGs for enrichments, FC and FDR are gethered from the DEA, logPGRN from the GRN output of Cell Oracle
+
+process_cell_type <- function(dea_file, grn_file,FC=1.25,FDR=0.05,logPGRN=2) {
+  # Read DEA
+  degs <- read.table(dea_file, header = TRUE, sep = "\t")
+  # Filter DEA
+  # depending on whether you want to filter by p-value or FDR, comment the right one : )
+  #degs_filtered <- degs[which(abs(degs$logFC) >= log2(FC) & degs$FDR <= FDR),]
+  degs_filtered <- degs[which(abs(degs$logFC) >= log2(FC) & degs$PValue <= FDR),]
+  
+  # Read GRN
+  GRN_raw <- read.table(grn_file, header = TRUE, sep = ",")
+  # Calculate threshold from coef_abs
+  # we try to exclude very low levels of coef_ from CellOracle (~correlation between TF and target gene expression)
+  thCA <- summary(GRN_raw$coef_abs)[2] # take the first quartile
+  # Filter GRN on thCA and -log10(PValue)
+  # based on filter value given to the function, default is 2 ~ 0.05
+  GRN <- GRN_raw[which(GRN_raw$coef_abs >= thCA & GRN_raw$X.logp >= logPGRN),]
+  # add target column to DEGs table: this help merging/comparing tables
+  degs_filtered$target <- rownames(degs_filtered)
+  # find DE among sources and targets : we want to focus on TFs that are effectively DE to explain DEGs
+  # this of course is a semplification : a key TF might be not DE per se
+  common_targets <- intersect(degs_filtered$target, unique(c(GRN$source,GRN$target)))
+  # list of DE TFs
+  TFs <- intersect(degs_filtered$target, GRN$source)
+  print(TFs)
+  # subset of the GRN where sources are DE TFs
+  GRN_TFs <- GRN[which(GRN$source %in% TFs),]
+  # filter Targets depending on your question: it will change the numerosity and quality of the background
+  #Targets <- unique(GRN_filtered$target)
+  #Targets <- unique(GRN$target)
+  # list of DE TFs targets
+  Targets <- unique(GRN_TFs$target)
+  # Initialize and populate results table
+  results_table <- data.frame(pDEGs = numeric(length(TFs)),
+                              nDEGs = numeric(length(TFs)),
+                              Enrichment = numeric(length(TFs)),
+                              row.names = TFs)
+  
+  # Loop through each transcription factor
+  for (i in seq_along(TFs)) {
+    print(i)
+    # take targets of TF_i in filtered GRN
+    targets_i <- GRN[GRN$source == TFs[i],]$target
+    # take all targets from FILTERED GRN
+    #targets_bg <- unique(GRN_raw$target)
+    targets_bg <- unique(GRN$target)
+    # Expressed Genes bg
+    DEGs_bg <- rownames(degs)
+    # DEGs represented in the GRN
+    # all DE targets
+    DEGs_GRN <- intersect(rownames(degs_filtered), targets_bg)
+    # all expr targets
+    expr_targets <- intersect(targets_bg,DEGs_bg)
+    # DE targets of TF_i
+    targets_i_DEGs_GRN <- intersect(targets_i, DEGs_GRN)
+    # Expr targets of TF_i
+    targets_i_bg <- intersect(targets_i,DEGs_bg)
+    # 'overlap.prob' is a custom function defined above to assess significance of two char sets (e.g. two lists of genes) vs a background (bg elsewhere)
+    # p of DE targets of TF_i vs DEGs in the GRN, bg is all targets EXPR in the filtered GRN
+    results_table[i,]$pDEGs <- overlap.prob(targets_i_DEGs_GRN, DEGs_GRN, expr_targets)
+    # n of DE in the GRN
+    # enrichment: how much a certain TF preferentially regulates the DEGs? ratio DE/Expr weighted by TF
+    results_table[i,]$nDEGs <- length(targets_i_DEGs_GRN)
+    r1_DEDA <- length(targets_i_DEGs_GRN) / length(DEGs_GRN) # DEGs target of TF_i, vs all DEGs in the GRN
+    r2_DEDA <- length(targets_i_bg) / length(expr_targets) # all expressed targets of the TF_i, all genes expr in the GRN
+    results_table[i,]$Enrichment <- r1_DEDA / r2_DEDA
+    results_table$TF_check <- i
+  }
+  
+  results_table$TF <- rownames(results_table)
+  results_table$logP <- -log10(results_table$pDEGs)
+  results_table <- results_table[order(results_table$logP, decreasing = TRUE),]
+  results_table$TF <- as.factor(results_table$TF)
+  results_table <- results_table[which(results_table$Enrichment >= 1 & results_table$logP >=2),]
+  return(results_table)
+}
+
+DEA <- data.frame(File = DEAlist, CellType = sapply(DEAlist, extract_cell_type, cell_types = cell_types), stringsAsFactors = FALSE)
+GRN <- data.frame(File = GRNlist, CellType = sapply(GRNlist, extract_cell_type, cell_types = cell_types), stringsAsFactors = FALSE)
+
+# Merge the data frames on cell type
+FileCouples <- merge(DEA, GRN, by = "CellType", suffixes = c("_DEA", "_GRN"))
+
+# Loop through each pair in FileCouples
+results <- list()
+for (i in 1:nrow(FileCouples)) {
+  dea_path <- paste0("~/Desktop/CHD2/MasterRegulatory_arch/DEA/", FileCouples[i, "File_DEA"])
+  grn_path <- paste0("~/Desktop/CHD2/MasterRegulatory_arch/GRN/", FileCouples[i, "File_GRN"])
+  print(dea_path)
+  print(grn_path)
+  results[[FileCouples[i, "CellType"]]] <- process_cell_type(dea_path, grn_path,1.25,0.01,2)  # Using cell type as the index for results
+}
+
+# Optional: Print results for a specific cell type
+print(results[["CycPg"]])
+print(results[["DirectP"]])
+print(results[["IndirectP"]])
+print(results[["DirectN"]])
+print(results[["IndirectN"]])
+
+
+maxDegsPerCT <- c(max(results[["CycPg"]]$nDEGs),
+max(results[["DirectP"]]$nDEGs),
+max(results[["DirectN"]]$nDEGs),
+max(results[["IndirectP"]]$nDEGs),
+max(results[["IndirectN"]]$nDEGs))
+names(maxDegsPerCT) <- c("CycPg","RadialGlia","ExcN","IP","MatExcN")
+barplot(maxDegsPerCT,border=NA,las=2,ylim=c(0,400))
+```
+
+```{r}
+# Assuming 'results' is a list of data frames, each named by cell type
+
+# Collect all data frames into one large data frame with an additional 'CellType' column
+all_results <- do.call(rbind, lapply(names(results), function(ct) {
+  df <- results[[ct]]
+  df$CellType <- ct  # Add a column with the cell type
+  return(df)
+}))
+
+# Now reshape the dataframe to match your desired structure
+df_DEDA_dotplot <- data.frame(
+  CellType = all_results$CellType,
+  TF = all_results$TF,
+  NumTargets = all_results$nDEGs,
+  Enrichments = all_results$Enrichment,
+  log10PValue = all_results$logP
+)
+
+# If needed, order or filter the dataframe
+df_DEDA_dotplot <- df_DEDA_dotplot[order(df_DEDA_dotplot$CellType),]
+df_DEDA_dotplot_arch <- df_DEDA_dotplot
+#df_DEDA_dotplot_arch[df_DEDA_dotplot_arch$log10PValue == "Inf",]$log10PValue <- max(df_DEDA_dotplot_arch[df_DEDA_dotplot_arch$log10PValue != "Inf",]$log10PValue)
+# write.table(df_DEDA_dotplot_arch,quote=F,sep="\t",row.names = F,file="~/Desktop/CHD2/202427_df_MRA2dotplot_arch_p001.tab")
+
+
+```
+
+
+# Dotplot of DE TFs
+
+```{r}
+
+head(df_DEDA_dotplot_arch)
+df_DEDA_dotplot_arch$CellType2 <- NA
+df_DEDA_dotplot_arch[df_DEDA_dotplot_arch$CellType == "CycPg",]$CellType2 <- "CycPg"
+df_DEDA_dotplot_arch[df_DEDA_dotplot_arch$CellType == "DirectN",]$CellType2 <- "ExcN"
+df_DEDA_dotplot_arch[df_DEDA_dotplot_arch$CellType == "DirectP",]$CellType2 <- "RadialGlia"
+df_DEDA_dotplot_arch[df_DEDA_dotplot_arch$CellType == "IndirectN",]$CellType2 <- "MatExcN"
+df_DEDA_dotplot_arch[df_DEDA_dotplot_arch$CellType == "IndirectP",]$CellType2 <- "IntermProg"
+
+
+library(ggplot2)
+pdf("~/Desktop/CHD2/MasterRegulatory_arch/20241205_TFcomboDE.dotplots_arch_p005.pdf",height = 4,width = 6.5)
+ggplot(df_DEDA_dotplot_arch, aes(x = TF, y = CellType2, size = log10PValue, color = Enrichments)) +
+  geom_point(alpha = 0.8) +
+  scale_size_continuous(range = c(1, 5)) +
+  scale_color_viridis_c(option = "viridis") +  # Using viridis color scale
+  theme_minimal() +
+  labs(
+    title = "Dotplot of TFs across Cell Types",
+    x = "Transcription Factor",
+    y = "Cell Type",
+    size = "Significance (-Log10 P-value)",
+    color = "Enrichment"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 5))
+dev.off()
+
+#
+```
+
+
+# Extract minimal networks centered on CHD2
+
+```{r}
+degs.CycPg_arch <- read.table(paste0("~/Desktop/CHD2/MasterRegulatory_arch/DEA/",FileCouples[1,2]),head=T,sep="\t")
+degs.CycPg_arch.f <- degs.CycPg_arch[abs(degs.CycPg_arch$logFC) >= log2(1.25) & degs.CycPg_arch$PValue <= 0.01,]
+GRN_CycPg_arch_raw <- read.table(paste0("~/Desktop/CHD2/MasterRegulatory_arch/GRN/",FileCouples[1,3]),head=T,sep=",")
+
+thCA <- summary(GRN_CycPg_arch_raw$coef_abs)[2]
+GRN_CycPg_arch <- GRN_CycPg_arch_raw[GRN_CycPg_arch_raw$coef_abs >= thCA & GRN_CycPg_arch_raw$X.logp >= 2,]
+degs.CycPg_arch.f$target <- rownames(degs.CycPg_arch.f)
+aRG_DEDA <- intersect(degs.CycPg_arch.f$target,GRN_CycPg_arch$source)
+GRN_CycPg_arch_DEDA <- GRN_CycPg_arch[GRN_CycPg_arch$source %in% aRG_DEDA,]
+GRN_CycPg_arch_DEDA_TFs <- unique(GRN_CycPg_arch_DEDA$source)
+GRN_CycPg_arch_DEDA_Targets <- unique(GRN_CycPg_arch_DEDA$target)
+GRN_CycPg_arch_DEDA_table <- matrix(0,nrow=length(GRN_CycPg_arch_DEDA_TFs),ncol=3)
+GRN_CycPg_arch_DEDA_table <- as.data.frame(GRN_CycPg_arch_DEDA_table)
+names(GRN_CycPg_arch_DEDA_table) <- c("pDEGs","nDEGs","Enrichment")
+rownames(GRN_CycPg_arch_DEDA_table) <- GRN_CycPg_arch_DEDA_TFs
+DE_CycPg <- degs.CycPg_arch.f
+library(GTscripts)
+for(i in 1:length(GRN_CycPg_arch_DEDA_TFs)){
+  targets_i <- GRN_CycPg_arch[GRN_CycPg_arch$source == GRN_CycPg_arch_DEDA_TFs[i],]$target
+  targets_bg <- unique(GRN_CycPg_arch_raw$target)
+  DEGs_bg <- rownames(DE_CycPg)
+  DEGs_GRN <- intersect(rownames(DE_CycPg),targets_bg)
+  targets_i_DEGs_GRN <- intersect(targets_i,DEGs_GRN)
+  targets_i_bg <- intersect(targets_i,DEGs_bg)
+  
+  GRN_CycPg_arch_DEDA_table[i,1] <- overlap.prob(targets_i_DEGs_GRN,DEGs_GRN,targets_bg)
+  GRN_CycPg_arch_DEDA_table[i,2] <- length(targets_i_DEGs_GRN)
+  
+  r1_DEDA <- length(targets_i_DEGs_GRN)/length(DEGs_GRN)
+  r2_DEDA <- length(targets_i_bg)/length(DEGs_bg)
+  GRN_CycPg_arch_DEDA_table[i,3] <- r1_DEDA/r2_DEDA
+}
+GRN_CycPg_arch_DEDA_table$TF <- rownames(GRN_CycPg_arch_DEDA_table)
+GRN_CycPg_arch_DEDA_table$logP <- -log10(GRN_CycPg_arch_DEDA_table$pDEGs)
+GRN_CycPg_arch_DEDA_table <- GRN_CycPg_arch_DEDA_table[order(GRN_CycPg_arch_DEDA_table$logP,decreasing = T),]
+GRN_CycPg_arch_DEDA_table$TF <- as.factor(GRN_CycPg_arch_DEDA_table$TF)
+GRN_CycPg_arch_DEDA_table[GRN_CycPg_arch_DEDA_table$Enrichment >= 1 & GRN_CycPg_arch_DEDA_table$nDEGs >= 10,]
+
+
+GRN_CycPg_arch_arch_tmp1 <- GRN_CycPg_arch[which(GRN_CycPg_arch$source == "CHD2" & GRN_CycPg_arch$target %in% GRN_CycPg_arch_DEDA_table[GRN_CycPg_arch_DEDA_table$Enrichment >= 1,]$TF),]
+
+GRN_CycPg_arch_arch_tmp2 <- GRN_CycPg_arch[which(GRN_CycPg_arch$target == "CHD2" & GRN_CycPg_arch$source %in% GRN_CycPg_arch_DEDA_table[GRN_CycPg_arch_DEDA_table$Enrichment >= 1,]$TF),]
+
+
+GRN_CycPg_arch_arch_minimal <- rbind(GRN_CycPg_arch_arch_tmp1,GRN_CycPg_arch_arch_tmp2)
+write.table(GRN_CycPg_arch_arch_minimal,file="~/Desktop/CHD2/minimalNetworks.CycPg.arch_p005.tab",quote=F,row.names = F,sep="\t")
+intersect(GRN_CycPg_arch_arch_minimal$source,rownames(degs.CycPg_arch.f))
+```
+```{r}
+degs.DirectP_arch <- read.table(paste0("~/Desktop/CHD2/MasterRegulatory_arch/DEA/",FileCouples[3,2]),head=T,sep="\t")
+degs.DirectP_arch.f <- degs.DirectP_arch[abs(degs.DirectP_arch$logFC) >= log2(1.25) & degs.DirectP_arch$PValue <= 0.01,]
+GRN_DirectP_arch_raw <- read.table(paste0("~/Desktop/CHD2/MasterRegulatory_arch/GRN/",FileCouples[3,3]),head=T,sep=",")
+
+thCA <- summary(GRN_DirectP_arch_raw$coef_abs)[2]
+GRN_DirectP_arch <- GRN_DirectP_arch_raw[GRN_DirectP_arch_raw$coef_abs >= thCA & GRN_DirectP_arch_raw$X.logp >= 2,]
+degs.DirectP_arch.f$target <- rownames(degs.DirectP_arch.f)
+aRG_DEDA <- intersect(degs.DirectP_arch.f$target,GRN_DirectP_arch$source)
+GRN_DirectP_arch_DEDA <- GRN_DirectP_arch[GRN_DirectP_arch$source %in% aRG_DEDA,]
+GRN_DirectP_arch_DEDA_TFs <- unique(GRN_DirectP_arch_DEDA$source)
+GRN_DirectP_arch_DEDA_Targets <- unique(GRN_DirectP_arch_DEDA$target)
+GRN_DirectP_arch_DEDA_table <- matrix(0,nrow=length(GRN_DirectP_arch_DEDA_TFs),ncol=3)
+GRN_DirectP_arch_DEDA_table <- as.data.frame(GRN_DirectP_arch_DEDA_table)
+names(GRN_DirectP_arch_DEDA_table) <- c("pDEGs","nDEGs","Enrichment")
+rownames(GRN_DirectP_arch_DEDA_table) <- GRN_DirectP_arch_DEDA_TFs
+DE_DirectP <- degs.DirectP_arch.f
+library(GTscripts)
+for(i in 1:length(GRN_DirectP_arch_DEDA_TFs)){
+  targets_i <- GRN_DirectP_arch[GRN_DirectP_arch$source == GRN_DirectP_arch_DEDA_TFs[i],]$target
+  targets_bg <- unique(GRN_DirectP_arch_raw$target)
+  DEGs_bg <- rownames(DE_DirectP)
+  DEGs_GRN <- intersect(rownames(DE_DirectP),targets_bg)
+  targets_i_DEGs_GRN <- intersect(targets_i,DEGs_GRN)
+  targets_i_bg <- intersect(targets_i,DEGs_bg)
+  
+  GRN_DirectP_arch_DEDA_table[i,1] <- overlap.prob(targets_i_DEGs_GRN,DEGs_GRN,targets_bg)
+  GRN_DirectP_arch_DEDA_table[i,2] <- length(targets_i_DEGs_GRN)
+  
+  r1_DEDA <- length(targets_i_DEGs_GRN)/length(DEGs_GRN)
+  r2_DEDA <- length(targets_i_bg)/length(DEGs_bg)
+  GRN_DirectP_arch_DEDA_table[i,3] <- r1_DEDA/r2_DEDA
+}
+GRN_DirectP_arch_DEDA_table$TF <- rownames(GRN_DirectP_arch_DEDA_table)
+GRN_DirectP_arch_DEDA_table$logP <- -log10(GRN_DirectP_arch_DEDA_table$pDEGs)
+GRN_DirectP_arch_DEDA_table <- GRN_DirectP_arch_DEDA_table[order(GRN_DirectP_arch_DEDA_table$logP,decreasing = T),]
+GRN_DirectP_arch_DEDA_table$TF <- as.factor(GRN_DirectP_arch_DEDA_table$TF)
+GRN_DirectP_arch_DEDA_table[GRN_DirectP_arch_DEDA_table$Enrichment >= 1 & GRN_DirectP_arch_DEDA_table$nDEGs >= 10,]
+
+
+GRN_DirectP_arch_arch_tmp1 <- GRN_DirectP_arch[which(GRN_DirectP_arch$source == "CHD2" & GRN_DirectP_arch$target %in% GRN_DirectP_arch_DEDA_table[GRN_DirectP_arch_DEDA_table$Enrichment >= 1,]$TF),]
+
+GRN_DirectP_arch_arch_tmp2 <- GRN_DirectP_arch[which(GRN_DirectP_arch$target == "CHD2" & GRN_DirectP_arch$source %in% GRN_DirectP_arch_DEDA_table[GRN_DirectP_arch_DEDA_table$Enrichment >= 1,]$TF),]
+
+
+GRN_DirectP_arch_arch_minimal <- rbind(GRN_DirectP_arch_arch_tmp1,GRN_DirectP_arch_arch_tmp2)
+write.table(GRN_DirectP_arch_arch_minimal,file="~/Desktop/CHD2/minimalNetworks.RadialGlia.arch_p005.tab",quote=F,row.names = F,sep="\t")
+intersect(GRN_DirectP_arch_arch_minimal$source,rownames(degs.DirectP_arch.f))
+```
+
+```{r}
+degs.DirectN_arch <- read.table(paste0("~/Desktop/CHD2/MasterRegulatory_arch/DEA/",FileCouples[2,2]),head=T,sep="\t")
+degs.DirectN_arch.f <- degs.DirectN_arch[abs(degs.DirectN_arch$logFC) >= log2(1.25) & degs.DirectN_arch$PValue <= 0.01,]
+GRN_DirectN_arch_raw <- read.table(paste0("~/Desktop/CHD2/MasterRegulatory_arch/GRN/",FileCouples[2,3]),head=T,sep=",")
+
+thCA <- summary(GRN_DirectN_arch_raw$coef_abs)[2]
+GRN_DirectN_arch <- GRN_DirectN_arch_raw[GRN_DirectN_arch_raw$coef_abs >= thCA & GRN_DirectN_arch_raw$X.logp >= 2,]
+degs.DirectN_arch.f$target <- rownames(degs.DirectN_arch.f)
+aRG_DEDA <- intersect(degs.DirectN_arch.f$target,GRN_DirectN_arch$source)
+GRN_DirectN_arch_DEDA <- GRN_DirectN_arch[GRN_DirectN_arch$source %in% aRG_DEDA,]
+GRN_DirectN_arch_DEDA_TFs <- unique(GRN_DirectN_arch_DEDA$source)
+GRN_DirectN_arch_DEDA_Targets <- unique(GRN_DirectN_arch_DEDA$target)
+GRN_DirectN_arch_DEDA_table <- matrix(0,nrow=length(GRN_DirectN_arch_DEDA_TFs),ncol=3)
+GRN_DirectN_arch_DEDA_table <- as.data.frame(GRN_DirectN_arch_DEDA_table)
+names(GRN_DirectN_arch_DEDA_table) <- c("pDEGs","nDEGs","Enrichment")
+rownames(GRN_DirectN_arch_DEDA_table) <- GRN_DirectN_arch_DEDA_TFs
+DE_DirectN <- degs.DirectN_arch.f
+library(GTscripts)
+for(i in 1:length(GRN_DirectN_arch_DEDA_TFs)){
+  targets_i <- GRN_DirectN_arch[GRN_DirectN_arch$source == GRN_DirectN_arch_DEDA_TFs[i],]$target
+  targets_bg <- unique(GRN_DirectN_arch_raw$target)
+  DEGs_bg <- rownames(DE_DirectN)
+  DEGs_GRN <- intersect(rownames(DE_DirectN),targets_bg)
+  targets_i_DEGs_GRN <- intersect(targets_i,DEGs_GRN)
+  targets_i_bg <- intersect(targets_i,DEGs_bg)
+  
+  GRN_DirectN_arch_DEDA_table[i,1] <- overlap.prob(targets_i_DEGs_GRN,DEGs_GRN,targets_bg)
+  GRN_DirectN_arch_DEDA_table[i,2] <- length(targets_i_DEGs_GRN)
+  
+  r1_DEDA <- length(targets_i_DEGs_GRN)/length(DEGs_GRN)
+  r2_DEDA <- length(targets_i_bg)/length(DEGs_bg)
+  GRN_DirectN_arch_DEDA_table[i,3] <- r1_DEDA/r2_DEDA
+}
+GRN_DirectN_arch_DEDA_table$TF <- rownames(GRN_DirectN_arch_DEDA_table)
+GRN_DirectN_arch_DEDA_table$logP <- -log10(GRN_DirectN_arch_DEDA_table$pDEGs)
+GRN_DirectN_arch_DEDA_table <- GRN_DirectN_arch_DEDA_table[order(GRN_DirectN_arch_DEDA_table$logP,decreasing = T),]
+GRN_DirectN_arch_DEDA_table$TF <- as.factor(GRN_DirectN_arch_DEDA_table$TF)
+GRN_DirectN_arch_DEDA_table[GRN_DirectN_arch_DEDA_table$Enrichment >= 1 & GRN_DirectN_arch_DEDA_table$nDEGs >= 10,]
+
+
+GRN_DirectN_arch_arch_tmp1 <- GRN_DirectN_arch[which(GRN_DirectN_arch$source == "CHD2" & GRN_DirectN_arch$target %in% GRN_DirectN_arch_DEDA_table[GRN_DirectN_arch_DEDA_table$Enrichment >= 1,]$TF),]
+
+GRN_DirectN_arch_arch_tmp2 <- GRN_DirectN_arch[which(GRN_DirectN_arch$target == "CHD2" & GRN_DirectN_arch$source %in% GRN_DirectN_arch_DEDA_table[GRN_DirectN_arch_DEDA_table$Enrichment >= 1,]$TF),]
+
+
+GRN_DirectN_arch_arch_minimal <- rbind(GRN_DirectN_arch_arch_tmp1,GRN_DirectN_arch_arch_tmp2)
+write.table(GRN_DirectN_arch_arch_minimal,file="~/Desktop/CHD2/minimalNetworks.ExcN.arch_p005.tab",quote=F,row.names = F,sep="\t")
+intersect(GRN_DirectN_arch_arch_minimal$source,rownames(degs.DirectN_arch.f))
+```
+
+```{r}
+degs.IndirectP_arch <- read.table(paste0("~/Desktop/CHD2/MasterRegulatory_arch/DEA/",FileCouples[5,2]),head=T,sep="\t")
+degs.IndirectP_arch.f <- degs.IndirectP_arch[abs(degs.IndirectP_arch$logFC) >= log2(1.25) & degs.IndirectP_arch$PValue <= 0.01,]
+GRN_IndirectP_arch_raw <- read.table(paste0("~/Desktop/CHD2/MasterRegulatory_arch/GRN/",FileCouples[5,3]),head=T,sep=",")
+
+thCA <- summary(GRN_IndirectP_arch_raw$coef_abs)[2]
+GRN_IndirectP_arch <- GRN_IndirectP_arch_raw[GRN_IndirectP_arch_raw$coef_abs >= thCA & GRN_IndirectP_arch_raw$X.logp >= 2,]
+degs.IndirectP_arch.f$target <- rownames(degs.IndirectP_arch.f)
+aRG_DEDA <- intersect(degs.IndirectP_arch.f$target,GRN_IndirectP_arch$source)
+GRN_IndirectP_arch_DEDA <- GRN_IndirectP_arch[GRN_IndirectP_arch$source %in% aRG_DEDA,]
+GRN_IndirectP_arch_DEDA_TFs <- unique(GRN_IndirectP_arch_DEDA$source)
+GRN_IndirectP_arch_DEDA_Targets <- unique(GRN_IndirectP_arch_DEDA$target)
+GRN_IndirectP_arch_DEDA_table <- matrix(0,nrow=length(GRN_IndirectP_arch_DEDA_TFs),ncol=3)
+GRN_IndirectP_arch_DEDA_table <- as.data.frame(GRN_IndirectP_arch_DEDA_table)
+names(GRN_IndirectP_arch_DEDA_table) <- c("pDEGs","nDEGs","Enrichment")
+rownames(GRN_IndirectP_arch_DEDA_table) <- GRN_IndirectP_arch_DEDA_TFs
+DE_IndirectP <- degs.IndirectP_arch.f
+library(GTscripts)
+for(i in 1:length(GRN_IndirectP_arch_DEDA_TFs)){
+  targets_i <- GRN_IndirectP_arch[GRN_IndirectP_arch$source == GRN_IndirectP_arch_DEDA_TFs[i],]$target
+  targets_bg <- unique(GRN_IndirectP_arch_raw$target)
+  DEGs_bg <- rownames(DE_IndirectP)
+  DEGs_GRN <- intersect(rownames(DE_IndirectP),targets_bg)
+  targets_i_DEGs_GRN <- intersect(targets_i,DEGs_GRN)
+  targets_i_bg <- intersect(targets_i,DEGs_bg)
+  
+  GRN_IndirectP_arch_DEDA_table[i,1] <- overlap.prob(targets_i_DEGs_GRN,DEGs_GRN,targets_bg)
+  GRN_IndirectP_arch_DEDA_table[i,2] <- length(targets_i_DEGs_GRN)
+  
+  r1_DEDA <- length(targets_i_DEGs_GRN)/length(DEGs_GRN)
+  r2_DEDA <- length(targets_i_bg)/length(DEGs_bg)
+  GRN_IndirectP_arch_DEDA_table[i,3] <- r1_DEDA/r2_DEDA
+}
+GRN_IndirectP_arch_DEDA_table$TF <- rownames(GRN_IndirectP_arch_DEDA_table)
+GRN_IndirectP_arch_DEDA_table$logP <- -log10(GRN_IndirectP_arch_DEDA_table$pDEGs)
+GRN_IndirectP_arch_DEDA_table <- GRN_IndirectP_arch_DEDA_table[order(GRN_IndirectP_arch_DEDA_table$logP,decreasing = T),]
+GRN_IndirectP_arch_DEDA_table$TF <- as.factor(GRN_IndirectP_arch_DEDA_table$TF)
+GRN_IndirectP_arch_DEDA_table[GRN_IndirectP_arch_DEDA_table$Enrichment >= 1 & GRN_IndirectP_arch_DEDA_table$nDEGs >= 10,]
+
+
+GRN_IndirectP_arch_arch_tmp1 <- GRN_IndirectP_arch[which(GRN_IndirectP_arch$source == "CHD2" & GRN_IndirectP_arch$target %in% GRN_IndirectP_arch_DEDA_table[GRN_IndirectP_arch_DEDA_table$Enrichment >= 1,]$TF),]
+
+GRN_IndirectP_arch_arch_tmp2 <- GRN_IndirectP_arch[which(GRN_IndirectP_arch$target == "CHD2" & GRN_IndirectP_arch$source %in% GRN_IndirectP_arch_DEDA_table[GRN_IndirectP_arch_DEDA_table$Enrichment >= 1,]$TF),]
+
+
+GRN_IndirectP_arch_arch_minimal <- rbind(GRN_IndirectP_arch_arch_tmp1,GRN_IndirectP_arch_arch_tmp2)
+write.table(GRN_IndirectP_arch_arch_minimal,file="~/Desktop/CHD2/minimalNetworks.IntermProg.arch_p005.tab",quote=F,row.names = F,sep="\t")
+intersect(GRN_IndirectP_arch_arch_minimal$source,rownames(degs.IndirectP_arch.f))
+```
+
+```{r}
+degs.IndirectN_arch <- read.table(paste0("~/Desktop/CHD2/MasterRegulatory_arch/DEA/",FileCouples[4,2]),head=T,sep="\t")
+degs.IndirectN_arch.f <- degs.IndirectN_arch[abs(degs.IndirectN_arch$logFC) >= log2(1.25) & degs.IndirectN_arch$PValue <= 0.01,]
+GRN_IndirectN_arch_raw <- read.table(paste0("~/Desktop/CHD2/MasterRegulatory_arch/GRN/",FileCouples[4,3]),head=T,sep=",")
+
+thCA <- summary(GRN_IndirectN_arch_raw$coef_abs)[2]
+GRN_IndirectN_arch <- GRN_IndirectN_arch_raw[GRN_IndirectN_arch_raw$coef_abs >= thCA & GRN_IndirectN_arch_raw$X.logp >= 2,]
+degs.IndirectN_arch.f$target <- rownames(degs.IndirectN_arch.f)
+aRG_DEDA <- intersect(degs.IndirectN_arch.f$target,GRN_IndirectN_arch$source)
+GRN_IndirectN_arch_DEDA <- GRN_IndirectN_arch[GRN_IndirectN_arch$source %in% aRG_DEDA,]
+GRN_IndirectN_arch_DEDA_TFs <- unique(GRN_IndirectN_arch_DEDA$source)
+GRN_IndirectN_arch_DEDA_Targets <- unique(GRN_IndirectN_arch_DEDA$target)
+GRN_IndirectN_arch_DEDA_table <- matrix(0,nrow=length(GRN_IndirectN_arch_DEDA_TFs),ncol=3)
+GRN_IndirectN_arch_DEDA_table <- as.data.frame(GRN_IndirectN_arch_DEDA_table)
+names(GRN_IndirectN_arch_DEDA_table) <- c("pDEGs","nDEGs","Enrichment")
+rownames(GRN_IndirectN_arch_DEDA_table) <- GRN_IndirectN_arch_DEDA_TFs
+DE_IndirectN <- degs.IndirectN_arch.f
+library(GTscripts)
+for(i in 1:length(GRN_IndirectN_arch_DEDA_TFs)){
+  targets_i <- GRN_IndirectN_arch[GRN_IndirectN_arch$source == GRN_IndirectN_arch_DEDA_TFs[i],]$target
+  targets_bg <- unique(GRN_IndirectN_arch_raw$target)
+  DEGs_bg <- rownames(DE_IndirectN)
+  DEGs_GRN <- intersect(rownames(DE_IndirectN),targets_bg)
+  targets_i_DEGs_GRN <- intersect(targets_i,DEGs_GRN)
+  targets_i_bg <- intersect(targets_i,DEGs_bg)
+  
+  GRN_IndirectN_arch_DEDA_table[i,1] <- overlap.prob(targets_i_DEGs_GRN,DEGs_GRN,targets_bg)
+  GRN_IndirectN_arch_DEDA_table[i,2] <- length(targets_i_DEGs_GRN)
+  
+  r1_DEDA <- length(targets_i_DEGs_GRN)/length(DEGs_GRN)
+  r2_DEDA <- length(targets_i_bg)/length(DEGs_bg)
+  GRN_IndirectN_arch_DEDA_table[i,3] <- r1_DEDA/r2_DEDA
+}
+GRN_IndirectN_arch_DEDA_table$TF <- rownames(GRN_IndirectN_arch_DEDA_table)
+GRN_IndirectN_arch_DEDA_table$logP <- -log10(GRN_IndirectN_arch_DEDA_table$pDEGs)
+GRN_IndirectN_arch_DEDA_table <- GRN_IndirectN_arch_DEDA_table[order(GRN_IndirectN_arch_DEDA_table$logP,decreasing = T),]
+GRN_IndirectN_arch_DEDA_table$TF <- as.factor(GRN_IndirectN_arch_DEDA_table$TF)
+GRN_IndirectN_arch_DEDA_table[GRN_IndirectN_arch_DEDA_table$Enrichment >= 1 & GRN_IndirectN_arch_DEDA_table$nDEGs >= 10,]
+
+
+GRN_IndirectN_arch_arch_tmp1 <- GRN_IndirectN_arch[which(GRN_IndirectN_arch$source == "CHD2" & GRN_IndirectN_arch$target %in% GRN_IndirectN_arch_DEDA_table[GRN_IndirectN_arch_DEDA_table$Enrichment >= 1,]$TF),]
+
+GRN_IndirectN_arch_arch_tmp2 <- GRN_IndirectN_arch[which(GRN_IndirectN_arch$target == "CHD2" & GRN_IndirectN_arch$source %in% GRN_IndirectN_arch_DEDA_table[GRN_IndirectN_arch_DEDA_table$Enrichment >= 1,]$TF),]
+
+
+GRN_IndirectN_arch_arch_minimal <- rbind(GRN_IndirectN_arch_arch_tmp1,GRN_IndirectN_arch_arch_tmp2)
+write.table(GRN_IndirectN_arch_arch_minimal,file="~/Desktop/CHD2/minimalNetworks.MatExcN.arch_p005.tab",quote=F,row.names = F,sep="\t")
+intersect(GRN_IndirectN_arch_arch_minimal$source,rownames(degs.IndirectN_arch.f))
+```
+
